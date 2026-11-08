@@ -239,6 +239,22 @@ $.stateDir expect string to match regexp /^\\//
 
 当前源码的 `stateDir` 配置约束要求 POSIX 绝对路径。Windows 原生路径 `D:/...` 不能直接使用。这是 Windows 原生运行的已验证阻塞，WSL/Linux 运行仍需继续核验。
 
+### 4.7 WSL/Linux 真实启动探针
+
+在 Ubuntu 24.04.1 WSL2 中固定了 Node 24.15.0、pnpm 11.7.0、DSSuperAgent 提交 `8c32a9d` 和 DSH `0.2.2-rc.1`：
+
+- DSH 官方 CLI 在 Linux 启动并打印 `0.2.2-rc.1`。
+- DSH headless 在隔离 Linux Workspace 和 `DSH_HOME` 中建立 Session。
+- 真实模型请求到达配置端点，继续返回上游 503。
+- DSSuperAgent `pnpm install --frozen-lockfile`、`pnpm typecheck` 和 `pnpm build` 通过。Linux 构建初次缺少 rolldown 的官方 Linux 原生可选包，补齐该包后构建通过。
+- DSSuperAgent bundle 加入 Linux DSH profile 后，Web 在 `127.0.0.1:3082` 启动。
+- `GET /orchestrator/api/state` 携带 `x-orchestrator-request: 1` 返回 HTTP 200。
+- `stateDir` 创建了 `orchestrator.sqlite`、WAL 文件和锁目录。目录权限为 700，数据库权限为 600。
+- 停止并重启 DSH profile 后，`masterId` 保持一致，运行状态恢复为 `setupPending`。
+- 未配置 GitHub repository 和 Agent account 时，DSSuperAgent 正确保持暂停，报告 `repositoryUnset`，没有伪造 Ticket 或 Worker 执行。
+
+这证明 Linux 运行层、DSSuperAgent bundle、SQLite 状态和重启恢复边界可以真实工作。真实 Source、Ticket、Worker Workspace 和越界执行仍需一个非生产 GitHub repository、专用 Agent account 和可用模型端点。
+
 ## 5. 兼容性和阻塞项
 
 ### 已确认
@@ -253,15 +269,16 @@ $.stateDir expect string to match regexp /^\\//
 1. DSSuperAgent 0.1.0 的 engines.dsh 要求是 ^0.2.1-alpha.2，官方 DSH 当前 npm latest 是 0.2.2-rc.1。是否兼容必须在固定版本的真实安装中验证，不能仅凭版本字符串判断。
 2. DSSuperAgent 当前只直接提供 GitHub 和可选 Feishu Source，其他企业通讯渠道需要新的 Source/Channel 适配。
 3. DSSuperAgent 的 worker preset、DSH sandbox 和我们的 Workspace Manager 如何组合，尚未在 WSL/Linux 上做真实重启、崩溃恢复和越界测试。
-4. 官方 Python SDK 当前文档指向已发布 0.2.1rc2，Windows 实际启动、模型请求和 Session 恢复尚未完成真实验收。
+4. 官方 Python SDK 当前文档指向已发布 0.2.1rc2，Windows 真实安装因 runtime wheel 下载长时间无进度而停止，尚未完成 SDK 入口验收。
 5. DSH 真实模型请求到达了配置端点，但上游两次返回 503，模型成功响应和 Agent 工具执行尚未验收。
 6. DSSuperAgent 的 Windows 原生 `stateDir` 约束要求 POSIX 绝对路径，WSL/Linux 运行仍需继续验证。
+7. Linux 的 DSSuperAgent Source、Ticket、Worker Workspace 和越界行为还需要真实 GitHub Source 授权与可用模型端点。
 
 ### 下一步最小核验
 
-1. 在 WSL2/Linux 临时目录固定一组版本：@deepseek-ai/dsh、DSSuperAgent commit 和 Node/pnpm。
-2. 为 DSH 准备独立 DSH_HOME、独立 Workspace 和非生产模型凭据。
-3. 先运行 DSH sdk-minimal 的一次任务，记录 RunResult、Session 文件和 Workspace 文件变化。
-4. 再安装 DSSuperAgent bundle，使用 observe 模式和本地或只读 Source，记录 Trigger、Decision、Ticket、Assignment、SQLite 和 Worker 目录。
-5. 通过重启、失败和越界测试后，才能把 Step 0 标记为通过并进入适配器实现。
+1. 恢复模型端点或提供可用的非生产 DSH 模型路由。
+2. 准备一个非生产 GitHub repository、专用 Agent account 和仅供该账号使用的 `gh` 配置，不在聊天中发送 token。
+3. 在 Linux profile 中配置 Source，使用 `observe` 模式确认 Trigger、Eval 和 Decision。
+4. 切换到 `auto` 或明确请求，记录 Ticket、Assignment、DSH Session 和 Worker 目录。
+5. 在重启、失败、越界和恢复测试后，才能把 Step 0 标记为通过并进入适配器实现。
 
