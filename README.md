@@ -31,6 +31,7 @@ Company Agent 是一个通用的公司内部自主助理平台。它观察经过
 - [上游事实核验表](docs/00-upstream-fact-sheet.md)
 - [Step 0 上游事实核验报告](docs/step0-upstream-research-agent.md)
 - [工作环境契约](contracts/agent-workspace.md)
+- [控制面契约](contracts/control-plane.md)
 - [DSSuperAgent 适配契约](contracts/dssuperagent-adapter.md)
 - [DSH 执行契约](contracts/dsh-execution.md)
 - [实施步骤](docs/02-implementation-plan.md)

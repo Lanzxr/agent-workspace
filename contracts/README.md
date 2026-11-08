@@ -5,6 +5,7 @@
 - [DSSuperAgent 适配契约](dssuperagent-adapter.md)
 - [DSH 执行契约](dsh-execution.md)
 - [Agent 工作环境契约](agent-workspace.md)
+- [控制面契约](control-plane.md)
 - [事件信封](event-envelope.md)
 - [工作项契约](work-item.md)
 
