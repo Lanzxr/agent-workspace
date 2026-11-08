@@ -28,7 +28,7 @@
 - 接入 Shell、Python、文件和依赖操作。
 - 验证日志、成果、状态和重启恢复。
 
-当前进度：已实现 `WorkspaceManager` 和 `WorkspaceRuntime` 的第一条可验收闭环。它们负责 Workspace 创建、固定目录结构、manifest 和依赖清单持久化、运行中状态恢复、Shell/Python 执行、超时和输出限制、成果和日志写入、路径越界检查，以及 Linux 目录和文件权限收紧。Windows 本地测试和 Ubuntu 24.04 WSL2 测试均通过。WSL2 可重复执行 `bash scripts/verify-workspace-wsl.sh`。
+当前进度：已实现 `WorkspaceManager` 和 `WorkspaceRuntime` 的第一条可验收闭环。它们负责 Workspace 创建、固定目录结构、manifest 和依赖清单持久化、运行中状态恢复、Shell/Python 执行、超时和输出限制、成果和日志写入、路径越界检查，以及 Linux 目录和文件权限收紧。Windows 本地测试和 Ubuntu 24.04 WSL2 测试均通过。WSL2 可重复执行 `bash scripts/verify-workspace-wsl.sh`，脚本还会用两个独立 Python 进程验证执行结果和成果可恢复读取。
 
 剩余工作：把执行租约和 WorkspaceRuntime 接入控制面，补充 Linux 级别的 CPU、内存和进程资源策略，再接入 DSH Adapter。当前执行仍是 Step 2 的本地运行时验证，不代表 DSH 已接入。
 

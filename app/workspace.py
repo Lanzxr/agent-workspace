@@ -12,7 +12,13 @@ from pathlib import Path
 WORKSPACE_DIRECTORIES = ("work", "tools", "artifacts", "logs", "state", "cache")
 WORKSPACE_MANIFEST = "workspace.json"
 WORKSPACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+EXECUTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 WORKSPACE_STATUSES = {"provisioned", "ready", "running", "suspended", "recovering", "failed", "deleted"}
+
+
+def validate_execution_id(execution_id: str) -> None:
+    if not isinstance(execution_id, str) or not EXECUTION_ID_PATTERN.fullmatch(execution_id):
+        raise ValueError("execution_id contains unsupported characters")
 
 
 class WorkspaceError(Exception):
@@ -230,8 +236,7 @@ class WorkspaceManager:
     def save_execution_record(self, workspace_id: str, record: dict[str, object]) -> None:
         self._ensure_writable_or_recovering(workspace_id)
         execution_id = record.get("execution_id")
-        if not isinstance(execution_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", execution_id):
-            raise ValueError("execution_id is required and must contain only letters, numbers, hyphens, or underscores")
+        validate_execution_id(execution_id)
         execution_directory = self._state_directory(workspace_id) / "executions"
         if execution_directory.is_symlink():
             raise WorkspacePathError(f"workspace execution directory is invalid: {execution_directory}")
@@ -240,8 +245,7 @@ class WorkspaceManager:
         self._write_json(execution_directory / f"{execution_id}.json", record)
 
     def get_execution_record(self, workspace_id: str, execution_id: str) -> dict[str, object]:
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", execution_id):
-            raise ValueError("execution_id contains unsupported characters")
+        validate_execution_id(execution_id)
         path = self._state_directory(workspace_id) / "executions" / f"{execution_id}.json"
         if not path.is_file() or path.is_symlink():
             raise WorkspaceNotFound(f"execution not found: {execution_id}")

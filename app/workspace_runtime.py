@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from .workspace import WorkspaceManager, WorkspaceNotFound, WorkspaceStateError
+from .workspace import WorkspaceManager, WorkspaceNotFound, WorkspaceStateError, validate_execution_id
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,7 @@ class WorkspaceRuntime:
     ) -> WorkspaceExecution:
         normalized_command = self._normalize_command(command)
         execution_id = execution_id or f"execution-{uuid.uuid4().hex}"
-        self._validate_execution_id(execution_id)
+        validate_execution_id(execution_id)
         try:
             self.manager.get_execution_record(workspace_id, execution_id)
         except WorkspaceNotFound:
@@ -249,11 +249,6 @@ class WorkspaceRuntime:
         if not values or any(not isinstance(value, str) or not value for value in values):
             raise ValueError("command must contain at least one non-empty string")
         return values
-
-    @staticmethod
-    def _validate_execution_id(execution_id: str) -> None:
-        if not execution_id or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in execution_id):
-            raise ValueError("execution_id contains unsupported characters")
 
     @staticmethod
     def _timestamp() -> str:
