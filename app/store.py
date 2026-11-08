@@ -49,6 +49,13 @@ class Store:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS approvals (
+                approval_id TEXT PRIMARY KEY,
+                work_item_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL,
+                requested_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS plans (
                 plan_id TEXT PRIMARY KEY,
                 work_item_id TEXT NOT NULL,

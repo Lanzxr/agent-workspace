@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-import sqlite3
 
 from .models import (
+    Approval,
     AuditEntry,
     Conversation,
     Event,
@@ -36,8 +37,8 @@ class NotFound(ControlPlaneError):
 
 
 WORK_ITEM_TRANSITIONS: dict[str, set[str]] = {
-    "candidate": {"proposed", "cancelled"},
-    "proposed": {"accepted", "rejected", "needs_approval", "candidate", "cancelled"},
+    "candidate": {"proposed"},
+    "proposed": {"accepted", "rejected", "needs_approval"},
     "needs_approval": {"accepted", "rejected", "cancelled"},
     "accepted": {"queued", "blocked", "cancelled"},
     "queued": {"running", "blocked", "cancelled"},
@@ -209,6 +210,8 @@ class ControlPlane:
     ) -> WorkItem:
         if not source_event_ids:
             raise ValueError("source_event_ids cannot be empty")
+        if not title.strip() or not objective.strip() or not risk_class.strip() or not completion_conditions:
+            raise ValueError("work item required fields are incomplete")
         for event_id in source_event_ids:
             self.get_event(event_id)
         now = self.now()
@@ -253,13 +256,68 @@ class ControlPlane:
     def request_work_item_approval(self, work_item_id: str, reason: str) -> WorkItem:
         return self._transition_work_item(work_item_id, "needs_approval", {"reason": reason})
 
+    def request_approval(
+        self, *, approval_id: str, work_item_id: str, scope: str, policy_version: str
+    ) -> Approval:
+        item = self.get_work_item(work_item_id)
+        if item.status != "needs_approval":
+            raise InvalidTransition(f"work item is {item.status}, not needs_approval")
+        if not scope.strip() or not policy_version.strip():
+            raise ValueError("approval scope and policy_version are required")
+        now = self.now()
+        approval = Approval(approval_id, work_item_id, scope, policy_version, "requested", now)
+        with self.store.transaction() as connection:
+            if connection.execute("SELECT 1 FROM approvals WHERE approval_id = ?", (approval_id,)).fetchone():
+                raise ControlPlaneError(f"approval already exists: {approval_id}")
+            connection.execute(
+                "INSERT INTO approvals(approval_id, work_item_id, payload, status, requested_at) VALUES (?, ?, ?, ?, ?)",
+                (approval_id, work_item_id, self.store.encode(approval.to_dict()), approval.status, now),
+            )
+            self._audit(connection, "approval", approval_id, "requested", {}, now)
+        return approval
+
+    def approve(self, approval_id: str, actor_ref: str) -> Approval:
+        approval = self.get_approval(approval_id)
+        if approval.status != "requested":
+            raise InvalidTransition(f"approval is already {approval.status}")
+        if not actor_ref.strip():
+            raise ValueError("approval actor is required")
+        approval.status = "approved"
+        approval.actor_ref = actor_ref
+        approval.decided_at = self.now()
+        with self.store.transaction() as connection:
+            connection.execute(
+                "UPDATE approvals SET payload = ?, status = ? WHERE approval_id = ?",
+                (self.store.encode(approval.to_dict()), approval.status, approval_id),
+            )
+            self._audit(connection, "approval", approval_id, "approved", {"actor_ref": actor_ref}, approval.decided_at)
+        return approval
+
+    def get_approval(self, approval_id: str) -> Approval:
+        row = self.store.connection.execute(
+            "SELECT payload FROM approvals WHERE approval_id = ?", (approval_id,)
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"approval not found: {approval_id}")
+        return Approval.from_dict(self.store.decode(row[0]))
+
     def queue_work_item(self, work_item_id: str) -> WorkItem:
         return self._transition_work_item(work_item_id, "queued")
 
     def start_work_item(self, work_item_id: str) -> WorkItem:
+        try:
+            self._find_plan_for_work_item(work_item_id)
+        except NotFound as error:
+            raise InvalidTransition("work item cannot start without a plan") from error
         return self._transition_work_item(work_item_id, "running")
 
     def complete_work_item(self, work_item_id: str) -> WorkItem:
+        try:
+            plan = self._find_plan_for_work_item(work_item_id)
+        except NotFound as error:
+            raise InvalidTransition("work item cannot complete without a plan") from error
+        if not plan.steps or any(step.status != "completed" for step in plan.steps):
+            raise InvalidTransition("work item cannot complete before all plan steps complete")
         return self._transition_work_item(work_item_id, "completed")
 
     def block_work_item(self, work_item_id: str, reason: str) -> WorkItem:
@@ -319,12 +377,19 @@ class ControlPlane:
         approval_ref: str | None = None,
     ) -> ExecutionRequest:
         item = self.get_work_item(work_item_id)
-        if item.status not in {"accepted", "queued", "running"}:
+        if item.status not in {"queued", "running"}:
             raise InvalidTransition(f"cannot execute work item in {item.status}")
         if not workspace_id.strip() or not capability.strip():
             raise ValueError("workspace_id and capability are required")
-        if item.risk_class != "low" and not approval_ref:
-            raise InvalidTransition("high-risk execution requires approval_ref")
+        if item.risk_class != "low":
+            if not approval_ref:
+                raise InvalidTransition("high-risk execution requires approval_ref")
+            try:
+                approval = self.get_approval(approval_ref)
+            except NotFound as error:
+                raise InvalidTransition("approval does not exist") from error
+            if approval.status != "approved" or approval.work_item_id != work_item_id:
+                raise InvalidTransition("approval is not approved for this work item")
         plan = self._find_plan_for_work_item(work_item_id)
         step = next((candidate for candidate in plan.steps if candidate.step_id == plan_step_id), None)
         if step is None:
@@ -448,6 +513,9 @@ class ControlPlane:
         idempotency_key: str,
     ) -> PublicationDecision:
         self.get_work_item(work_item_id)
+        self.get_conversation(conversation_id)
+        if not idempotency_key.strip():
+            raise ValueError("idempotency_key is required")
         if disposition not in {"suppress", "private_nudge", "group_update", "urgent_escalation"}:
             raise ValueError(f"unsupported publication disposition: {disposition}")
         if disposition != "suppress" and not body.strip():

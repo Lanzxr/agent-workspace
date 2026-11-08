@@ -105,6 +105,12 @@ class ControlPlaneTests(unittest.TestCase):
 
     def test_publication_decision_creates_one_idempotent_outbox_message(self) -> None:
         self.plane.ingest_event(self.event())
+        self.plane.create_conversation(
+            conversation_id="conversation-1",
+            kind="test",
+            participant_refs=["actor-1"],
+            policy_version="policy-1",
+        )
         self.plane.create_work_item(
             work_item_id="work-1",
             title="Work",
@@ -117,8 +123,21 @@ class ControlPlaneTests(unittest.TestCase):
         self.plane.propose_work_item("work-1")
         self.plane.accept_work_item("work-1")
         self.plane.queue_work_item("work-1")
-        self.plane.start_work_item("work-1")
-        self.plane.complete_work_item("work-1")
+        self.plane.create_plan(
+            plan_id="plan-1",
+            work_item_id="work-1",
+            steps=[PlanStep(step_id="step-1", ordinal=1, title="Complete")],
+        )
+        self.plane.create_execution_request(
+            execution_id="execution-1",
+            work_item_id="work-1",
+            plan_step_id="step-1",
+            workspace_id="workspace-1",
+            capability="test.capability",
+            parameters={},
+        )
+        self.plane.start_execution("execution-1")
+        self.plane.record_execution_result(ExecutionResult(execution_id="execution-1", status="succeeded"))
 
         first = self.plane.decide_publication(
             decision_id="decision-1",
@@ -187,6 +206,14 @@ class ControlPlaneTests(unittest.TestCase):
             owner_ref="owner-1",
         )
         self.plane.propose_work_item("work-1")
+        self.plane.request_work_item_approval("work-1", "High-risk capability")
+        self.plane.request_approval(
+            approval_id="approval-1",
+            work_item_id="work-1",
+            scope="safe.read",
+            policy_version="policy-1",
+        )
+        self.plane.approve("approval-1", "reviewer-1")
         self.plane.accept_work_item("work-1")
         self.plane.queue_work_item("work-1")
         self.plane.create_plan(

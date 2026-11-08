@@ -116,6 +116,25 @@ class Memory:
 
 
 @dataclass
+class Approval:
+    approval_id: str
+    work_item_id: str
+    scope: str
+    policy_version: str
+    status: str
+    requested_at: str
+    decided_at: str | None = None
+    actor_ref: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "Approval":
+        return cls(**value)
+
+
+@dataclass
 class PlanStep:
     step_id: str
     ordinal: int
