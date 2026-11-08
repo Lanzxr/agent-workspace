@@ -39,6 +39,8 @@ Workspace Manager 必须提供：
 - 在重启后恢复未完成执行
 - 导出可审计的 Workspace 摘要
 
+当前本地运行时已验证 Shell/Python 调用、超时、输出字节上限、依赖清单、执行记录和 WSL2 进程重启后的状态恢复。CPU、内存、进程数和内核级隔离仍由后续 Linux 运行时策略和 DSH Adapter 提供，不能把当前进程级限制当成完整安全沙箱。
+
 ## 隔离规则
 
 - 默认禁止宿主机根目录和 Docker Socket。
