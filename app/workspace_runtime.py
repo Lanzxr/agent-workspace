@@ -285,4 +285,3 @@ class WorkspaceRuntime:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-
