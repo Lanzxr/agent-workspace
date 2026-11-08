@@ -28,6 +28,7 @@ Company Agent 是一个通用的公司内部自主助理平台。它观察经过
 - [技术基线](PROJECT_BASELINE.md)
 - [技术决策](DECISIONS.md)
 - [架构说明](docs/01-architecture.md)
+- [上游事实核验表](docs/00-upstream-fact-sheet.md)
 - [工作环境契约](contracts/agent-workspace.md)
 - [DSSuperAgent 适配契约](contracts/dssuperagent-adapter.md)
 - [DSH 执行契约](contracts/dsh-execution.md)
