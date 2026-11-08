@@ -28,6 +28,10 @@
 - 接入 Shell、Python、文件和依赖操作。
 - 验证日志、成果、状态和重启恢复。
 
+当前进度：已实现 `WorkspaceManager` 第一条垂直切片。它负责 Workspace 创建、固定目录结构、manifest 持久化、运行中状态恢复、成果和日志写入、路径越界检查，以及 Linux 目录和文件权限收紧。Windows 本地测试和 Ubuntu 24.04 WSL2 测试均通过。
+
+剩余工作：接入真实执行租约、依赖清单、资源限制和 DSH Adapter。当前实现还没有把 Shell 或 Python 执行直接接入控制面。
+
 完成条件：一次真实执行在独立 Workspace 中完成，容器或进程重启后仍可查询成果。
 
 ## Step 3：接入 DSH
