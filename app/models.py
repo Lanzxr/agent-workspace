@@ -13,8 +13,25 @@ class Event:
     actor_id: str
     occurred_at: str
     content: str
-    attachments: list[dict[str, Any]] = field(default_factory=list)
-    capabilities: list[str] = field(default_factory=list)
+    attachments: list[dict[str, Any]]
+    capabilities: list[str]
+
+    def __post_init__(self) -> None:
+        required = {
+            "event_id": self.event_id,
+            "source_type": self.source_type,
+            "source_id": self.source_id,
+            "conversation_id": self.conversation_id,
+            "actor_id": self.actor_id,
+            "occurred_at": self.occurred_at,
+            "content": self.content,
+        }
+        if any(not isinstance(value, str) or not value.strip() for value in required.values()):
+            raise ValueError("event required fields must be non-empty strings")
+        if any(not isinstance(attachment, dict) for attachment in self.attachments):
+            raise ValueError("event attachments must be objects")
+        if any(not isinstance(capability, str) or not capability.strip() for capability in self.capabilities):
+            raise ValueError("event capabilities must be non-empty strings")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -42,6 +59,59 @@ class WorkItem:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "WorkItem":
+        return cls(**value)
+
+
+@dataclass
+class Conversation:
+    conversation_id: str
+    kind: str
+    participant_refs: list[str]
+    policy_version: str
+    created_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "Conversation":
+        return cls(**value)
+
+
+@dataclass
+class Thread:
+    thread_id: str
+    conversation_id: str
+    title: str
+    event_ids: list[str]
+    status: str
+    created_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "Thread":
+        return cls(**value)
+
+
+@dataclass
+class Memory:
+    memory_id: str
+    key: str
+    value: str
+    source_event_ids: list[str]
+    confidence: float
+    created_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "Memory":
         return cls(**value)
 
 
@@ -78,8 +148,9 @@ class WorkPlan:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "WorkPlan":
-        steps = [PlanStep.from_dict(step) for step in value.pop("steps")]
-        return cls(steps=steps, **value)
+        data = dict(value)
+        steps = [PlanStep.from_dict(step) for step in data.pop("steps")]
+        return cls(steps=steps, **data)
 
 
 @dataclass

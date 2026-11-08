@@ -15,9 +15,9 @@
 - 建立幂等、状态转换、审计和 Outbox。
 - 先用确定性假适配器验证状态机，不宣称上游接入完成。
 
-当前进度：已实现 Event、Work Item、Work Plan、Execution Request、Execution Result、Publication Decision、Outbox 和 Audit 的 SQLite 最小闭环。已通过事件幂等、状态转换、执行结果回写和发布去重测试。
+当前进度：已实现 Event、Conversation、Thread、Memory、Work Item、Work Plan、Execution Request、Execution Result、Publication Decision、Outbox 和 Audit 的 SQLite 最小闭环。已实现提案、接受、拒绝、审批等待、高风险执行审批引用和中断执行恢复。确定性假适配器已验证事件到提案的边界。
 
-剩余工作：Conversation、Thread、Memory、审批策略和统一上游适配器仍待实现。
+剩余工作：完整权限策略、统一上游适配器和真实 DSH 执行仍待实现。
 
 完成条件：事件可以产生工作意图，意图可以被后端接受、拒绝或等待审批。
 
