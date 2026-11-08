@@ -216,6 +216,7 @@ message: No available upstream channel. Please try again later.
 - PyPI JSON 显示 deepseek-harness-sdk 当前版本为 0.2.1rc2。
 - py -3 -m pip install --dry-run --no-deps deepseek-harness-sdk==0.2.1rc2 成功解析 Windows 通用 wheel。
 - py -3 -m pip index versions deepseek-harness-sdk 在当前 pip 版本返回无匹配，这是索引命令结果与 PyPI JSON 不一致，不能据此否定 wheel。尚未安装并运行真实 SDK。
+- 真实安装探针开始下载 83.9MB 的 `deepseek-harness-runtime-bin` Windows wheel，长时间无进度后停止。没有把 Python SDK 标记为安装或运行通过。
 
 来源：[PyPI SDK metadata](https://pypi.org/pypi/deepseek-harness-sdk/json)、[PyPI runtime metadata](https://pypi.org/pypi/deepseek-harness-runtime-bin/json)
 
