@@ -44,5 +44,5 @@
 - DSSuperAgent 类型检查和构建通过，Windows 原生测试受 POSIX 工具和符号链接条件影响。
 - DSSuperAgent bundle 在 Windows profile 中被加载，但 `stateDir` 要求 POSIX 绝对路径，原生 Windows 启动被阻塞。
 - DSSuperAgent bundle 在 Linux profile 中真实启动，SQLite/WAL、权限、HTTP 状态 API 和重启后的 `masterId` 恢复通过。
-- Step 0 尚未通过。剩余是真实 Source 授权、Ticket/Worker Workspace、工具执行和越界行为验收。
+- 上游 GitHub Source 适配器尚未完成端到端验收。它是可选适配器验收，不是 Company Agent 核心工作流的阻塞。核心工作流继续使用本地 Event 和 Channel Adapter 验证。
 

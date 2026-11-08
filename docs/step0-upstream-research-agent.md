@@ -270,7 +270,7 @@ $.stateDir expect string to match regexp /^\\//
 - 未配置 GitHub repository 和 Agent account 时，DSSuperAgent 正确保持暂停，报告 `repositoryUnset`，没有伪造 Ticket 或 Worker 执行。
 - 通过 DSH 自定义 Provider Route 后，真实模型请求返回完成结果。
 
-这证明 Linux 运行层、DSSuperAgent bundle、SQLite 状态、重启恢复和 DSH 模型调用边界可以真实工作。真实 Source、Ticket、Worker Workspace 和越界执行仍需一个非生产 GitHub repository、专用 Agent account 和对应的授权策略。
+这证明 Linux 运行层、DSSuperAgent bundle、SQLite 状态、重启恢复和 DSH 模型调用边界可以真实工作。`repositoryUnset` 只说明上游自带的 GitHub Source 没有配置，不代表 Company Agent 的核心工作流需要 GitHub。核心工作流可以通过本地或其他 Channel Adapter 注入 Event 继续验证。只有验收 DSSuperAgent 自带的 GitHub Source 时，才需要非生产 GitHub repository、专用 Agent account 和对应的授权策略。
 
 ## 5. 兼容性和阻塞项
 
@@ -288,15 +288,15 @@ $.stateDir expect string to match regexp /^\\//
 2. DSSuperAgent 当前只直接提供 GitHub 和可选 Feishu Source，其他企业通讯渠道需要新的 Source/Channel 适配。
 3. DSSuperAgent 的 worker preset、DSH sandbox 和我们的 Workspace Manager 如何组合，尚未在 WSL/Linux 上做真实重启、崩溃恢复和越界测试。
 4. 官方 Python SDK 当前文档指向已发布 0.2.1rc2，Windows 真实安装因 runtime wheel 下载长时间无进度而停止，尚未完成 SDK 入口验收。
-5. DSSuperAgent 的真实 Source、Ticket、Worker Workspace 和工具执行尚未使用企业模型路由完成端到端验收。
+5. DSSuperAgent 自带的 GitHub Source 到 Ticket、Worker Workspace 和工具执行尚未使用企业模型路由完成端到端验收。这是可选上游适配器验收，不是 Company Agent 核心工作流阻塞。
 6. DSSuperAgent 的 Windows 原生 `stateDir` 约束要求 POSIX 绝对路径，WSL/Linux 运行仍需继续验证。
-7. Linux 的 DSSuperAgent Source、Ticket、Worker Workspace 和越界行为还需要真实 GitHub Source 授权，并把 Custom Model Provider 接入实际的 DSSuperAgent profile。
+7. 如果要验收 DSSuperAgent 自带的 GitHub Source，仍需要真实 GitHub Source 授权和实际的 DSSuperAgent profile 配置。
 
 ### 下一步最小核验
 
 1. 由安装器或运行时配置生成企业模型的 DSH Custom Model Provider，保留 `runtime.env` 在部署目录，不进入仓库。
-2. 如需验收 DSSuperAgent 的 GitHub Source，准备一个非生产 GitHub repository、专用 Agent account 和仅供该账号使用的 `gh` 配置，不在聊天中发送 token。这个对象只用于 Source、Ticket、Worker 和发布链路验收。
-3. 在 Linux profile 中配置 Source，使用 `observe` 模式确认 Trigger、Eval 和 Decision。
-4. 切换到 `auto` 或明确请求，记录 Ticket、Assignment、DSH Session 和 Worker 目录。
-5. 在重启、失败、越界和恢复测试后，才能把 Step 0 标记为通过并进入适配器实现。
+2. 继续使用本地 Event 和本地 Channel Adapter 验证通用工作流、Workspace、权限、执行和发布策略。
+3. 如果要验收 DSSuperAgent 自带的 GitHub Source，再准备非生产 GitHub repository、专用 Agent account 和仅供该账号使用的 `gh` 配置。这个对象只用于 GitHub Source 适配器验收。
+4. 在 Linux profile 中配置 Source，使用 `observe` 模式确认 Trigger、Eval 和 Decision。
+5. 在重启、失败、越界和恢复测试后，才能把对应的上游适配器验收标记为通过。
 

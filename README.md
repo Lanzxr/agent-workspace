@@ -34,6 +34,7 @@ Company Agent 是一个通用的公司内部自主助理平台。它观察经过
 - [工作环境契约](contracts/agent-workspace.md)
 - [控制面契约](contracts/control-plane.md)
 - [模型 Provider Route 决策](docs/adr/0002-custom-model-provider-route.md)
+- [GitHub Source 边界决策](docs/adr/0003-github-source-is-optional.md)
 - [DSSuperAgent 适配契约](contracts/dssuperagent-adapter.md)
 - [DSH 执行契约](contracts/dsh-execution.md)
 - [实施步骤](docs/02-implementation-plan.md)
