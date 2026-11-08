@@ -39,9 +39,10 @@
 - DSH CLI 在 Node 24.15.0 的 Windows 环境启动和 profile 帮助探针通过。
 - DSH CLI 在 Ubuntu 24.04.1 WSL2 的 Node 24.15.0 环境启动通过。
 - DSH 隔离 `DSH_HOME`、Session 持久化和无凭据错误事件探针通过。
-- DSH 真实模型请求到达配置端点，但两次返回上游 503，模型成功调用仍为阻塞。
+- 企业模型网关 `/models` 返回 HTTP 200，`deepseek-v4.1-flash` 的直接 Chat Completions 返回 HTTP 200。
+- DSH 通过 `llm-pi-ai` 自定义 Provider Route 调用 `deepseek-v4.1-flash` 返回 `completed`，环境变量本身不会自动替换内置 `deepseek-official` 路由。
 - DSSuperAgent 类型检查和构建通过，Windows 原生测试受 POSIX 工具和符号链接条件影响。
 - DSSuperAgent bundle 在 Windows profile 中被加载，但 `stateDir` 要求 POSIX 绝对路径，原生 Windows 启动被阻塞。
 - DSSuperAgent bundle 在 Linux profile 中真实启动，SQLite/WAL、权限、HTTP 状态 API 和重启后的 `masterId` 恢复通过。
-- Step 0 尚未通过。剩余是可用模型端点、真实 Source 授权、Ticket/Worker Workspace 和越界行为验收。
+- Step 0 尚未通过。剩余是真实 Source 授权、Ticket/Worker Workspace、工具执行和越界行为验收。
 

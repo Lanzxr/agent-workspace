@@ -199,9 +199,18 @@ dsh --profile acp --help                     exit 0
 
 这证明官方 DSH CLI 在满足 Node 版本时可以启动、接受任务输入、产生机器可读结果并持久化 Session。它没有证明模型调用已经成功。
 
-### 4.4 DSH 真实模型端点探针
+### 4.4 模型端点与 DSH Provider Route 探针
 
-使用项目外部配置源中的模型 URL 和 API key，未输出密钥内容，在隔离 Workspace 和 `DSH_HOME` 中运行两次真实 DSH headless 请求。两次都完成了 DSH 启动、Session 建立和模型请求阶段，但上游返回：
+使用项目外部配置源中的模型 URL 和 API key，未输出密钥内容，先验证模型服务本身，再验证 DSH 的真实调用链。
+
+直接 HTTP 探针结果如下：
+
+- `GET /models` 返回 HTTP 200。
+- 返回模型包含 `deepseek-v4.1-flash`。
+- 使用 `deepseek-v4.1-flash` 调用 OpenAI Chat Completions 返回 HTTP 200，并返回 `choices`、`model` 和 `usage`。
+- 使用 `deepseek-chat` 返回 `model_not_found`。这说明当前网关的模型目录与 DeepSeek 官方默认模型名不同。
+
+第一次 DSH headless 探针只设置环境变量，仍使用内置 `deepseek-official` 路由，返回：
 
 ~~~text
 code: SERVER
@@ -209,7 +218,14 @@ status: 503
 message: No available upstream channel. Please try again later.
 ~~~
 
-当前结论是 DSH 到配置端点的调用链已经打通到上游响应，模型服务本身返回 503。不能把这次结果标记成 DSH 模型调用通过，也不能把它归因于 DSH 代码错误。
+这不是模型服务不可用的证据，而是 DSH 没有把这组环境变量转换成企业网关的 Provider Route。按照 DSH 官方 providers 契约，在隔离 profile 中增加了一个 `llm-pi-ai` 自定义路由，使用 `openai-completions`、企业网关 base URL、环境变量凭据和 `deepseek-v4.1-flash`，并把 `agent-default-model` 指向该路由。该配置下 DSH headless 真实请求返回：
+
+~~~text
+status: completed
+final: STEP0_CUSTOM_PROVIDER_OK
+~~~
+
+当前结论是模型端点和 DSH 自定义 Provider Route 都已通过最小真实调用。项目仍需把这条 Provider Route 由安装器或运行时配置生成，不能把密钥写入仓库。
 
 ### 4.5 Python SDK 发行探针
 
@@ -252,8 +268,9 @@ $.stateDir expect string to match regexp /^\\//
 - `stateDir` 创建了 `orchestrator.sqlite`、WAL 文件和锁目录。目录权限为 700，数据库权限为 600。
 - 停止并重启 DSH profile 后，`masterId` 保持一致，运行状态恢复为 `setupPending`。
 - 未配置 GitHub repository 和 Agent account 时，DSSuperAgent 正确保持暂停，报告 `repositoryUnset`，没有伪造 Ticket 或 Worker 执行。
+- 通过 DSH 自定义 Provider Route 后，真实模型请求返回完成结果。
 
-这证明 Linux 运行层、DSSuperAgent bundle、SQLite 状态和重启恢复边界可以真实工作。真实 Source、Ticket、Worker Workspace 和越界执行仍需一个非生产 GitHub repository、专用 Agent account 和可用模型端点。
+这证明 Linux 运行层、DSSuperAgent bundle、SQLite 状态、重启恢复和 DSH 模型调用边界可以真实工作。真实 Source、Ticket、Worker Workspace 和越界执行仍需一个非生产 GitHub repository、专用 Agent account 和对应的授权策略。
 
 ## 5. 兼容性和阻塞项
 
@@ -263,6 +280,7 @@ $.stateDir expect string to match regexp /^\\//
 2. DSH 有官方 CLI、Python SDK、JSON-RPC stdio、显式 Workspace/Home、Session JSONL 持久化和基础文件 sandbox 能力。
 3. 上游工作目录和文件 fence 不能独自代表产品级隔离。Workspace Manager 仍是本项目必须补齐的边界。
 4. DSSuperAgent 在 Windows 原生 DSH profile 中被实际加载，但 `D:/...` 的 `stateDir` 被 POSIX 路径校验拒绝。
+5. 当前企业模型网关的直接 HTTP 调用和 DSH 自定义 Provider Route 已经通过最小真实请求。
 
 ### 未确认
 
@@ -270,14 +288,14 @@ $.stateDir expect string to match regexp /^\\//
 2. DSSuperAgent 当前只直接提供 GitHub 和可选 Feishu Source，其他企业通讯渠道需要新的 Source/Channel 适配。
 3. DSSuperAgent 的 worker preset、DSH sandbox 和我们的 Workspace Manager 如何组合，尚未在 WSL/Linux 上做真实重启、崩溃恢复和越界测试。
 4. 官方 Python SDK 当前文档指向已发布 0.2.1rc2，Windows 真实安装因 runtime wheel 下载长时间无进度而停止，尚未完成 SDK 入口验收。
-5. DSH 真实模型请求到达了配置端点，但上游两次返回 503，模型成功响应和 Agent 工具执行尚未验收。
+5. DSSuperAgent 的真实 Source、Ticket、Worker Workspace 和工具执行尚未使用企业模型路由完成端到端验收。
 6. DSSuperAgent 的 Windows 原生 `stateDir` 约束要求 POSIX 绝对路径，WSL/Linux 运行仍需继续验证。
-7. Linux 的 DSSuperAgent Source、Ticket、Worker Workspace 和越界行为还需要真实 GitHub Source 授权与可用模型端点。
+7. Linux 的 DSSuperAgent Source、Ticket、Worker Workspace 和越界行为还需要真实 GitHub Source 授权，并把 Custom Model Provider 接入实际的 DSSuperAgent profile。
 
 ### 下一步最小核验
 
-1. 恢复模型端点或提供可用的非生产 DSH 模型路由。
-2. 准备一个非生产 GitHub repository、专用 Agent account 和仅供该账号使用的 `gh` 配置，不在聊天中发送 token。
+1. 由安装器或运行时配置生成企业模型的 DSH Custom Model Provider，保留 `runtime.env` 在部署目录，不进入仓库。
+2. 如需验收 DSSuperAgent 的 GitHub Source，准备一个非生产 GitHub repository、专用 Agent account 和仅供该账号使用的 `gh` 配置，不在聊天中发送 token。这个对象只用于 Source、Ticket、Worker 和发布链路验收。
 3. 在 Linux profile 中配置 Source，使用 `observe` 模式确认 Trigger、Eval 和 Decision。
 4. 切换到 `auto` 或明确请求，记录 Ticket、Assignment、DSH Session 和 Worker 目录。
 5. 在重启、失败、越界和恢复测试后，才能把 Step 0 标记为通过并进入适配器实现。

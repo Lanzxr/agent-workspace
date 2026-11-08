@@ -24,6 +24,7 @@ Company Agent 是一个通用的公司内部自主助理平台。它观察经过
 
 ## 目录
 
+- [领域语言](CONTEXT.md)
 - [项目边界](PROJECT_BOUNDARY.md)
 - [技术基线](PROJECT_BASELINE.md)
 - [技术决策](DECISIONS.md)
@@ -32,6 +33,7 @@ Company Agent 是一个通用的公司内部自主助理平台。它观察经过
 - [Step 0 上游事实核验报告](docs/step0-upstream-research-agent.md)
 - [工作环境契约](contracts/agent-workspace.md)
 - [控制面契约](contracts/control-plane.md)
+- [模型 Provider Route 决策](docs/adr/0002-custom-model-provider-route.md)
 - [DSSuperAgent 适配契约](contracts/dssuperagent-adapter.md)
 - [DSH 执行契约](contracts/dsh-execution.md)
 - [实施步骤](docs/02-implementation-plan.md)
