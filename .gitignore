@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+data/
+runtime/
+artifacts/
+logs/
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+dist/
+build/
+
