@@ -49,3 +49,18 @@
 
 开发者可以使用 native-dev、WSL2 和 Docker 验证核心逻辑。产品交付时通过安装包准备运行时和依赖，不能把手工安装 Docker 作为终端用户前置条件。
 
+## D008 DSH 首期使用 Headless JSON Adapter
+
+状态：已接受
+
+日期：2026-11-15
+
+DSH Adapter 调用官方 Headless JSON/NDJSON 接口。只有 DSH 报告 completed、工具调用和结果配对有效且声明的产物通过工作区校验，Execution 才能成功。执行结果先写工作区外的私有回执，再更新控制面；无回执的中断执行不自动重放。模型凭据只进入 DSH 的 Provider 环境，DSH 子进程按上游 credential-shaped environment scrub 规则过滤该变量。
+
+## D009 DSH Shell 使用 Bubblewrap 用户命名空间
+
+状态：已接受
+日期：2026-11-15
+
+WSL2 开发期由 Bubblewrap 限制 DSH 的一次性 Bash 文件和网络访问：根文件系统只读，`/mnt`、`/run`、WSL 用户目录和整个 Company Agent 私有数据目录在子进程中不可见，仅当前 Workspace 重新挂入并可按 `workspace-write` 写入。自定义 `--config` 若位于其它可见路径，会在 Shell 中被 `/dev/null` 覆盖；若配置位于 Workspace 内则拒绝执行。DSH 本身及模型 Provider 请求不进入 Bubblewrap。DSH 文件读取、持久 Shell、PowerShell、终端和工作目录切换工具关闭。缺少 Bubblewrap 或 Workspace 位于受保护路径时，执行在启动前失败。进程可见性、设备和资源配额仍未完整隔离；它不是容器或生产安全边界。产品安装器需在目标 Windows/Linux 运行时准备并重新验收等效能力。
+

@@ -1,6 +1,8 @@
 .env
 .env.*
 !.env.example
+runtime.env
+company-agent-runtime/
 data/
 runtime/
 artifacts/

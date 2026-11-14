@@ -388,7 +388,8 @@ class ControlPlane:
                 approval = self.get_approval(approval_ref)
             except NotFound as error:
                 raise InvalidTransition("approval does not exist") from error
-            if approval.status != "approved" or approval.work_item_id != work_item_id:
+            if (approval.status != "approved" or approval.work_item_id != work_item_id
+                    or approval.scope != capability):
                 raise InvalidTransition("approval is not approved for this work item")
         plan = self._find_plan_for_work_item(work_item_id)
         step = next((candidate for candidate in plan.steps if candidate.step_id == plan_step_id), None)
@@ -443,6 +444,11 @@ class ControlPlane:
         return ExecutionResult(**self.store.decode(row[0]))
 
     def start_execution(self, execution_id: str) -> ExecutionRequest:
+        with self.store.transaction() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._start_execution(connection, execution_id)
+
+    def _start_execution(self, connection: sqlite3.Connection, execution_id: str) -> ExecutionRequest:
         request = self.get_execution(execution_id)
         if request.status != "queued":
             raise InvalidTransition(f"execution is already {request.status}")
@@ -453,20 +459,33 @@ class ControlPlane:
         step.status = "running"
         plan.updated_at = request.updated_at
         item = self.get_work_item(request.work_item_id)
+        if item.status not in {"queued", "running"}:
+            raise InvalidTransition(f"cannot execute work item in {item.status}")
+        if item.risk_class != "low":
+            if not request.approval_ref:
+                raise InvalidTransition("execution requires approval_ref")
+            approval = self.get_approval(request.approval_ref)
+            if (approval.status != "approved" or approval.work_item_id != item.work_item_id
+                    or approval.scope != request.capability):
+                raise InvalidTransition("approval does not authorize this capability")
         if item.status == "queued":
             item.status = "running"
             item.updated_at = request.updated_at
-        with self.store.transaction() as connection:
-            connection.execute(
-                "UPDATE executions SET payload = ?, status = ?, updated_at = ? WHERE execution_id = ?",
-                (self.store.encode(request.to_dict()), request.status, request.updated_at, execution_id),
-            )
-            self._save_plan(connection, plan)
-            self._save_work_item(connection, item)
-            self._audit(connection, "execution", execution_id, "started", {}, request.updated_at)
+        connection.execute(
+            "UPDATE executions SET payload = ?, status = ?, updated_at = ? WHERE execution_id = ?",
+            (self.store.encode(request.to_dict()), request.status, request.updated_at, execution_id),
+        )
+        self._save_plan(connection, plan)
+        self._save_work_item(connection, item)
+        self._audit(connection, "execution", execution_id, "started", {}, request.updated_at)
         return request
 
     def record_execution_result(self, result: ExecutionResult) -> ExecutionRequest:
+        with self.store.transaction() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._record_execution_result(connection, result)
+
+    def _record_execution_result(self, connection: sqlite3.Connection, result: ExecutionResult) -> ExecutionRequest:
         request = self.get_execution(result.execution_id)
         if request.status != "running":
             raise InvalidTransition(f"execution is {request.status}")
@@ -480,24 +499,24 @@ class ControlPlane:
         step.status = "completed" if result.status == "succeeded" else "failed"
         plan.updated_at = now
         item = self.get_work_item(request.work_item_id)
-        if result.status == "succeeded" and all(candidate.status == "completed" for candidate in plan.steps):
+        if (item.status == "running" and result.status == "succeeded"
+                and all(candidate.status == "completed" for candidate in plan.steps)):
             item.status = "completed"
             item.updated_at = now
-        elif result.status != "succeeded":
+        elif item.status == "running" and result.status != "succeeded":
             item.status = "failed"
             item.updated_at = now
-        with self.store.transaction() as connection:
-            connection.execute(
-                "UPDATE executions SET payload = ?, status = ?, updated_at = ? WHERE execution_id = ?",
-                (self.store.encode(request.to_dict()), request.status, now, request.execution_id),
-            )
-            connection.execute(
-                "INSERT OR REPLACE INTO execution_results(execution_id, payload, created_at) VALUES (?, ?, ?)",
-                (result.execution_id, self.store.encode(result.to_dict()), now),
-            )
-            self._save_plan(connection, plan)
-            self._save_work_item(connection, item)
-            self._audit(connection, "execution", result.execution_id, f"result:{result.status}", {}, now)
+        connection.execute(
+            "UPDATE executions SET payload = ?, status = ?, updated_at = ? WHERE execution_id = ?",
+            (self.store.encode(request.to_dict()), request.status, now, request.execution_id),
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO execution_results(execution_id, payload, created_at) VALUES (?, ?, ?)",
+            (result.execution_id, self.store.encode(result.to_dict()), now),
+        )
+        self._save_plan(connection, plan)
+        self._save_work_item(connection, item)
+        self._audit(connection, "execution", result.execution_id, f"result:{result.status}", {}, now)
         return request
 
     def decide_publication(
@@ -587,6 +606,9 @@ class ControlPlane:
         ).fetchall()
         for row in rows:
             request = ExecutionRequest.from_dict(self.store.decode(row[0]))
+            if request.capability == "dsh.task":
+                # The dispatcher reconciles durable receipts under a live Workspace lease.
+                continue
             now = self.now()
             request.status = "queued"
             request.updated_at = now
