@@ -11,7 +11,7 @@ import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 from .execution_state import private_directory, write_private_json
 from .models import ExecutionRequest, ExecutionResult
@@ -58,12 +58,14 @@ class DshAdapter:
     """Drive the official headless transport; the control plane owns task state."""
 
     def __init__(self, config: RuntimeConfig, manager: WorkspaceManager, runtime_directory: Path,
-                 *, bubblewrap_executable: Path | None = None) -> None:
+                 *, bubblewrap_executable: Path | None = None,
+                 web_search_enabled: Callable[[], bool] | None = None) -> None:
         self.config = config
         self.manager = manager
         self.runtime_directory = private_directory(runtime_directory.resolve())
         self.private_data_directory = self.runtime_directory.parent
         self.bubblewrap_executable = bubblewrap_executable
+        self.web_search_enabled = web_search_enabled
         if not manager.base_directory.is_relative_to(self.private_data_directory):
             raise ValueError("Workspace and DSH runtime data must share one private data directory")
         if self.runtime_directory.is_relative_to(manager.base_directory):
@@ -115,7 +117,9 @@ class DshAdapter:
         temporary_directory = private_directory(workspace.root / "cache" / "tmp")
         runner_path = self._write_sandbox_runner(runtime_home, workspace.root)
         patch_path = runtime_home / "provider.patch.yml"
-        provider_patch = self.config.provider_patch()
+        provider_patch = self.config.provider_patch(
+            web_enabled=self.web_search_enabled() if self.web_search_enabled else None
+        )
         provider_patch.extend([
             {"id": "sandbox", "config": {
                 "runnerCommand": [str(runner_path)],

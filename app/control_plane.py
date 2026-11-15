@@ -65,6 +65,27 @@ class ControlPlane:
     def close(self) -> None:
         self.store.close()
 
+    def get_setting(self, key: str, default: Any = None) -> Any:
+        row = self.store.connection.execute("SELECT payload FROM settings WHERE setting_key=?", (key,)).fetchone()
+        return self.store.decode(row[0])["value"] if row else default
+
+    def set_setting(self, key: str, value: Any) -> None:
+        if not key.strip() or len(key) > 120:
+            raise ValueError("setting key must contain 1 to 120 characters")
+        now = self.now()
+        with self.store.transaction() as connection:
+            connection.execute("INSERT INTO settings(setting_key,payload,updated_at) VALUES (?,?,?) "
+                               "ON CONFLICT(setting_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at",
+                               (key, self.store.encode({"value": value}), now))
+            self._audit(connection, "setting", key, "updated", {"value": value}, now)
+
+    def set_runtime_status(self, key: str, value: Any) -> None:
+        now = self.now()
+        with self.store.transaction() as connection:
+            connection.execute("INSERT INTO settings(setting_key,payload,updated_at) VALUES (?,?,?) "
+                               "ON CONFLICT(setting_key) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at",
+                               (key, self.store.encode({"value": value}), now))
+
     @staticmethod
     def now() -> str:
         return datetime.now(timezone.utc).isoformat()

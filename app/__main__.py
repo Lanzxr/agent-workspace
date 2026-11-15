@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from uuid import uuid4
 
 from .assistant_workflow import AssistantPolicy, DssuperAgentWorkflow
+from .admin_api import serve as serve_admin
 from .control_plane import ControlPlane, ControlPlaneError, NotFound
 from .dsh import DshAdapter
 from .dssuperagent import DssuperAgentAdapter, DssuperAgentError
@@ -16,6 +18,8 @@ from .execution_state import ExecutionBusy, private_directory
 from .models import Event, PlanStep
 from .qq_channel import QQBotAPI, QQChannelService, QQGateway
 from .runtime_config import QQBotSettings, RuntimeConfig
+from .scheduler import ScheduleService, SchedulerWorker
+from .scheduled_resume import ScheduledResumeHandler
 from .workspace import WorkspaceError, WorkspaceManager
 
 
@@ -47,6 +51,12 @@ def main() -> int:
     qq_serve.add_argument("--config", type=Path, default=Path.home() / ".config/company-agent/runtime.env")
     qq_serve.add_argument("--dssuperagent-url", default="http://127.0.0.1:3082")
     qq_serve.add_argument("--decision-timeout", type=float, default=120)
+    admin = commands.add_parser("admin-serve", help="Run the authenticated local control console")
+    admin.add_argument("--host", default="127.0.0.1")
+    admin.add_argument("--port", type=int, default=8765)
+    admin.add_argument("--config", type=Path, default=Path.home() / ".config/company-agent/runtime.env")
+    admin.add_argument("--dssuperagent-url", default="http://127.0.0.1:3082")
+    admin.add_argument("--decision-timeout", type=float, default=120)
     outbox = commands.add_parser("outbox", help="Inspect or manually resolve uncertain outbound messages")
     outbox_commands = outbox.add_subparsers(dest="outbox_command", required=True)
     outbox_commands.add_parser("list", help="List outbound message states")
@@ -65,6 +75,25 @@ def main() -> int:
             print(json.dumps(manager.summary(arguments.workspace_id), ensure_ascii=False, indent=2))
             return 0
         plane = ControlPlane.open(data_directory / "control.sqlite")
+        if arguments.command == "admin-serve":
+            configured = RuntimeConfig._parse_env(arguments.config).get("COMPANY_AGENT_ADMIN_TOKEN", "")
+            token = (os.environ.get("COMPANY_AGENT_ADMIN_TOKEN") or configured).strip()
+            if len(token) < 24:
+                raise ValueError("set COMPANY_AGENT_ADMIN_TOKEN to a random value of at least 24 characters")
+            settings = QQBotSettings.load(arguments.config)
+            api = QQBotAPI(settings)
+            scheduler_plane = ControlPlane.open(data_directory / "control.sqlite")
+            channel = QQChannelService(
+                scheduler_plane,
+                DssuperAgentWorkflow(scheduler_plane, DssuperAgentAdapter(arguments.dssuperagent_url),
+                                     decision_timeout=arguments.decision_timeout),
+                api,
+                settings,
+            )
+            worker = SchedulerWorker(ScheduleService(scheduler_plane.store), ScheduledResumeHandler(channel))
+            channel.flush_outbox()
+            serve_admin(plane, data_directory, arguments.host, arguments.port, token, worker)
+            return 0
         if arguments.command == "outbox":
             if arguments.outbox_command == "list":
                 print(json.dumps([message.to_dict() for message in plane.list_outbox()], ensure_ascii=False, indent=2))
@@ -83,7 +112,9 @@ def main() -> int:
                 settings,
             )
             service.flush_outbox()
-            asyncio.run(QQGateway(api, service.handle_gateway_event).run_forever())
+            asyncio.run(QQGateway(api, service.handle_gateway_event,
+                                  on_status=lambda state: plane.set_runtime_status(
+                                      "qq_gateway", {"state": state, "updated_at": plane.now()})).run_forever())
             return 0
         if arguments.command == "assistant-event":
             event_value = json.loads(arguments.event_file.read_text(encoding="utf-8-sig"))
@@ -105,7 +136,8 @@ def main() -> int:
             dispatcher = None
             if manager is not None:
                 config = RuntimeConfig.load(arguments.config)
-                adapter = DshAdapter(config, manager, data_directory / "runtime")
+                adapter = DshAdapter(config, manager, data_directory / "runtime",
+                                     web_search_enabled=lambda: bool(plane.get_setting("web_search_enabled", config.web_search_enabled)))
                 dispatcher = ExecutionDispatcher(plane, manager, adapter, data_directory / "runtime")
             workflow = DssuperAgentWorkflow(
                 plane,
@@ -150,7 +182,8 @@ def main() -> int:
         else:
             manager = WorkspaceManager(data_directory / "workspaces")
             config = RuntimeConfig.load(arguments.config)
-            adapter = DshAdapter(config, manager, data_directory / "runtime")
+            adapter = DshAdapter(config, manager, data_directory / "runtime",
+                                 web_search_enabled=lambda: bool(plane.get_setting("web_search_enabled", config.web_search_enabled)))
             saved = ExecutionDispatcher(plane, manager, adapter, data_directory / "runtime").dispatch(arguments.execution_id)
         print(json.dumps(saved.to_dict(), ensure_ascii=False, indent=2))
         return 0 if saved.status == "succeeded" else 1

@@ -12,7 +12,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit, quote
 from urllib.request import Request, urlopen
 
 from .assistant_workflow import DssuperAgentWorkflow
+from .attachments import AttachmentIngestor
 from .control_plane import ControlPlane, InvalidTransition
+from .identity import IdentityRegistry
 from .models import Event, OutboxMessage
 from .runtime_config import QQBotSettings
 
@@ -47,11 +49,15 @@ def normalize_group_message(app_id: str, event_type: str, payload: dict[str, Any
     if not isinstance(content, str):
         raise ValueError("QQ group message content must be a string")
     raw_attachments = payload.get("attachments", [])
-    if not isinstance(raw_attachments, list) or any(not isinstance(item, dict) for item in raw_attachments):
-        raise ValueError("QQ group message attachments must be an array of objects")
+    if (not isinstance(raw_attachments, list) or len(raw_attachments) > 10
+            or any(not isinstance(item, dict) for item in raw_attachments)):
+        raise ValueError("QQ group message attachments must be an array of at most ten objects")
     attachments = [{key: value for key, value in item.items()
                     if key in {"content_type", "filename", "url"} and isinstance(value, str)}
                    for item in raw_attachments]
+    if any(len(value) > (2048 if key == "url" else 200)
+           for item in attachments for key, value in item.items()):
+        raise ValueError("QQ attachment metadata exceeds its size limit")
     body = content.strip() or ("[附件]" if attachments else "[空消息]")
     event = Event(
         event_id=f"qq:{app_id}:group:{message_id}",
@@ -142,11 +148,14 @@ class QQBotAPI:
 
 class QQChannelService:
     def __init__(self, plane: ControlPlane, workflow: DssuperAgentWorkflow, api: QQBotAPI,
-                 settings: QQBotSettings):
+                 settings: QQBotSettings, *, identities: IdentityRegistry | None = None,
+                 attachment_ingestor: AttachmentIngestor | None = None):
         self.plane = plane
         self.workflow = workflow
         self.api = api
         self.settings = settings
+        self.identities = identities or IdentityRegistry(plane.store)
+        self.attachment_ingestor = attachment_ingestor or AttachmentIngestor(plane.store)
 
     def handle_gateway_event(self, event_type: str, payload: dict[str, Any]) -> None:
         try:
@@ -157,6 +166,13 @@ class QQChannelService:
         if normalized is None:
             return
         event, destination = normalized
+        external_actor_id = event.actor_id
+        event = Event(event.event_id, event.source_type, event.source_id, event.conversation_id,
+                      self.identities.resolve(provider="qq", account_id=self.settings.app_id,
+                                              scope_id=event.source_id, external_id=external_actor_id),
+                      event.occurred_at, event.content, event.attachments, event.capabilities,
+                      external_actor_id=external_actor_id)
+        event = self.attachment_ingestor.enrich_event(event)
         run = self.workflow.process_event(event)
         self._decide_publication(event, run.to_dict(), destination)
         self.flush_outbox()
@@ -208,10 +224,12 @@ class QQChannelService:
 
 
 class QQGateway:
-    def __init__(self, api: QQBotAPI, on_event: Callable[[str, dict[str, Any]], None], *, reconnect_delay: float = 2):
+    def __init__(self, api: QQBotAPI, on_event: Callable[[str, dict[str, Any]], None], *, reconnect_delay: float = 2,
+                 on_status: Callable[[str], None] | None = None):
         self.api = api
         self.on_event = on_event
         self.reconnect_delay = reconnect_delay
+        self.on_status = on_status
         self.sequence: int | None = None
         self.session_id: str | None = None
 
@@ -252,6 +270,8 @@ class QQGateway:
                                 event_type = frame.get("t")
                                 if event_type == "READY" and isinstance(data, dict):
                                     self.session_id = data.get("session_id") or self.session_id
+                                if event_type in {"READY", "RESUMED"} and self.on_status:
+                                    self.on_status("connected")
                                 if event_type != "RESUMED" and isinstance(event_type, str) and isinstance(data, dict):
                                     await asyncio.to_thread(self.on_event, event_type, data)
                                 if isinstance(sequence, int):
@@ -267,6 +287,8 @@ class QQGateway:
                                 raise ConnectionError("QQ gateway invalidated the current session")
                             elif op == 11:
                                 heartbeat_ack.set()
+                                if self.on_status:
+                                    self.on_status("connected")
                     finally:
                         if heartbeat:
                             heartbeat.cancel()
@@ -275,6 +297,8 @@ class QQGateway:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
+                if self.on_status:
+                    self.on_status("reconnecting")
                 print(f"company-agent: QQ gateway reconnecting after {type(error).__name__}", file=sys.stderr)
                 await asyncio.sleep(self.reconnect_delay)
 

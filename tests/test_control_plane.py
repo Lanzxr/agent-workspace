@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from app.control_plane import ControlPlane, InvalidTransition
@@ -40,6 +41,12 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(stored.content, "A generic work request")
         audit = self.plane.list_audit(entity_type="event", entity_id="event-1")
         self.assertEqual([entry.action for entry in audit], ["ingested"])
+
+    def test_event_can_be_ingested_from_gateway_worker_thread(self) -> None:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            self.assertTrue(executor.submit(self.plane.ingest_event, self.event()).result())
+
+        self.assertEqual(self.plane.get_event("event-1").content, "A generic work request")
 
     def test_work_item_plan_execution_and_result_form_a_complete_flow(self) -> None:
         self.plane.ingest_event(self.event())

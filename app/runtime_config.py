@@ -17,7 +17,7 @@ class QQBotSettings:
     app_id: str
     client_secret: str = field(repr=False)
     allowed_publications: frozenset[str] = frozenset()
-    api_base_url: str = "https://api.sgroup.qq.com"
+    api_base_url: str = "https://api.bot.qq.com"
 
     @classmethod
     def load(cls, path: Path) -> "QQBotSettings":
@@ -35,7 +35,7 @@ class QQBotSettings:
         supported = {"group_update", "urgent_escalation"}
         if not allowed.issubset(supported):
             raise ValueError("QQBOT_ALLOWED_PUBLICATIONS supports group_update and urgent_escalation")
-        api_base_url = (values.get("QQBOT_API_BASE_URL") or "https://api.sgroup.qq.com").strip().rstrip("/")
+        api_base_url = (values.get("QQBOT_API_BASE_URL") or "https://api.bot.qq.com").strip().rstrip("/")
         parsed = urlsplit(api_base_url)
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("QQBOT_API_BASE_URL must be an HTTPS base URL without credentials or query")
@@ -49,6 +49,7 @@ class RuntimeConfig:
     api_key: str = field(repr=False)
     dsh_command: tuple[str, ...] = ()
     source_path: Path | None = None
+    web_search_enabled: bool = False
 
     @classmethod
     def load(cls, path: Path) -> "RuntimeConfig":
@@ -78,7 +79,8 @@ class RuntimeConfig:
             if not isinstance(decoded, list) or not decoded or any(not isinstance(arg, str) or not arg for arg in decoded):
                 raise ValueError("AGENT_DSH_COMMAND must be a non-empty JSON string array")
             command = tuple(decoded)
-        return cls(url, model, key, command, path.expanduser().resolve())
+        web_enabled = values.get("AGENT_WEB_SEARCH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        return cls(url, model, key, command, path.expanduser().resolve(), web_enabled)
 
     @staticmethod
     def _parse_env(path: Path) -> dict[str, str]:
@@ -116,7 +118,8 @@ class RuntimeConfig:
             values[name] = value
         return values
 
-    def provider_patch(self) -> list[dict[str, object]]:
+    def provider_patch(self, *, web_enabled: bool | None = None) -> list[dict[str, object]]:
+        enabled = self.web_search_enabled if web_enabled is None else web_enabled
         return [
             {"id": "agent-default-model", "config": {"provider": "company-agent", "model": self.model_name}},
             {"id": "llm-pi-ai", "config": {"providers": {"company-agent": {
@@ -127,7 +130,7 @@ class RuntimeConfig:
                 "models": [{"id": self.model_name, "contextWindow": 128000, "maxTokens": 4096}],
             }}}},
             {"id": "llm-deepseek", "disabled": True},
-            {"id": "tool-web", "disabled": True},
+            {"id": "tool-web", "disabled": not enabled},
             {"id": "plugin-manager", "disabled": True},
             {"id": "tool-plugin-manager", "disabled": True},
         ]

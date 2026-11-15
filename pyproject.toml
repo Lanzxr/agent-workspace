@@ -9,8 +9,14 @@ description = "Generic Company Agent control plane, persistent workspaces, and D
 requires-python = ">=3.11"
 dependencies = ["websockets>=12,<17"]
 
+[project.optional-dependencies]
+attachments = ["pypdf>=5,<7"]
+
 [project.scripts]
 company-agent = "app.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.setuptools.data-files]
+"share/company-agent/web" = ["web/index.html"]

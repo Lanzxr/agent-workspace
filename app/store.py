@@ -11,7 +11,7 @@ from typing import Any
 class Store:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path)
+        self.connection = sqlite3.connect(path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
@@ -104,6 +104,45 @@ class Store:
                 entity_type TEXT NOT NULL,
                 entity_id TEXT NOT NULL,
                 action TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS managed_users (
+                user_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                time_zone TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS identity_bindings (
+                binding_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                user_id TEXT NOT NULL REFERENCES managed_users(user_id),
+                created_at TEXT NOT NULL,
+                UNIQUE(provider, account_id, scope_id, external_id)
+            );
+            CREATE INDEX IF NOT EXISTS identity_bindings_user_idx ON identity_bindings(user_id);
+            CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                schedule_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                due_at TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS scheduled_tasks_due_idx ON scheduled_tasks(status, due_at);
+            CREATE TABLE IF NOT EXISTS settings (
+                setting_key TEXT PRIMARY KEY,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS attachments (
+                attachment_id TEXT PRIMARY KEY,
+                event_id TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
