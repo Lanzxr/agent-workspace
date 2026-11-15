@@ -24,8 +24,8 @@ class QQBotSettings:
         if not path.is_file():
             raise ValueError(f"runtime configuration not found: {path}")
         values = RuntimeConfig._parse_env(path)
-        app_id = (values.get("QQBOT_APP_ID") or "").strip()
-        client_secret = (values.get("QQBOT_CLIENT_SECRET") or "").strip()
+        app_id = (values.get("QQBOT_APP_ID") or values.get("QQBOT_APPID") or "").strip()
+        client_secret = (values.get("QQBOT_CLIENT_SECRET") or values.get("QQBOT_SECRET") or "").strip()
         if not app_id or not client_secret:
             raise ValueError("QQBOT_APP_ID and QQBOT_CLIENT_SECRET are required")
         if any(character in app_id + client_secret for character in "\r\n\x00"):

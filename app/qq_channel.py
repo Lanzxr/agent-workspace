@@ -17,6 +17,7 @@ from .models import Event, OutboxMessage
 from .runtime_config import QQBotSettings
 
 QQ_GROUP_MESSAGE_INTENT = 1 << 25
+QQ_TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 
 
 def normalize_group_message(app_id: str, event_type: str, payload: dict[str, Any]) -> tuple[Event, dict[str, str]] | None:
@@ -100,7 +101,7 @@ class QQBotAPI:
     def access_token(self) -> str:
         if self._token and time.monotonic() < self._token_expires_at - 60:
             return self._token
-        result = self._request("POST", f"{self.settings.api_base_url}/app/getAppAccessToken", body={
+        result = self._request("POST", QQ_TOKEN_URL, body={
             "appId": self.settings.app_id,
             "clientSecret": self.settings.client_secret,
         })

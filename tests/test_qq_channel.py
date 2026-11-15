@@ -55,6 +55,17 @@ class QQMessageNormalizationTests(unittest.TestCase):
 
 
 class QQConfigTests(unittest.TestCase):
+    def test_existing_runtime_config_key_aliases_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "runtime.env"
+            path.write_text("QQBOT_APPID=app\nQQBOT_SECRET=secret\n", encoding="utf-8")
+
+            settings = QQBotSettings.load(path)
+
+            self.assertEqual(settings.app_id, "app")
+            self.assertEqual(settings.client_secret, "secret")
+            self.assertEqual(settings.allowed_publications, frozenset())
+
     def test_publication_allowlist_defaults_to_empty_and_accepts_supported_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "runtime.env"
@@ -176,6 +187,8 @@ class QQApiTests(unittest.TestCase):
         api._request = Mock(side_effect=[{"access_token": "token", "expires_in": 7200},
                                   {"url": "wss://gateway.example.test"}])
         self.assertEqual(api.gateway_url(), "wss://gateway.example.test?v=1&encoding=json")
+        self.assertEqual(api._request.call_args_list[0].args[:2],
+                         ("POST", "https://bots.qq.com/app/getAppAccessToken"))
         api.access_token = Mock(return_value="access-token")
         api._request = Mock(return_value={})
         message = OutboxMessage("outbox-1", "group-1", "Update", "key", "sending", "now",
