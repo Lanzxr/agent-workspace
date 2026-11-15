@@ -37,6 +37,9 @@ Company Agent 是一个通用的公司内部自主助理平台。它观察经过
 - [GitHub Source 边界决策](docs/adr/0003-github-source-is-optional.md)
 - [DSSuperAgent 适配契约](contracts/dssuperagent-adapter.md)
 - [DSH 执行契约](contracts/dsh-execution.md)
+- [Step 3 DSH 接入与验收](docs/04-step3-dsh.md)
+- [Step 4 DSSuperAgent 接入与验收](docs/05-step4-dssuperagent.md)
+- [DSSuperAgent Step 4 桥接补丁](patches/dssuperagent-company-agent-step4.patch)
 - [实施步骤](docs/02-implementation-plan.md)
 - [原始需求归档](source/README.md)
 

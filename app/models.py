@@ -98,6 +98,37 @@ class Thread:
 
 
 @dataclass
+class AssistantRun:
+    event_id: str
+    status: str
+    policy_version: str = "unknown"
+    conversation_id: str | None = None
+    thread_id: str | None = None
+    upstream_trigger_id: str | None = None
+    upstream_thread_key: str | None = None
+    decision_id: str | None = None
+    decision: dict[str, Any] | None = None
+    work_item_id: str | None = None
+    plan_id: str | None = None
+    execution_ids: list[str] = field(default_factory=list)
+    execution_results: list[dict[str, Any]] = field(default_factory=list)
+    publication: dict[str, Any] | None = None
+    auto_authorized: bool = False
+    workspace_id: str | None = None
+    error_category: str | None = None
+    error: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "AssistantRun":
+        return cls(**value)
+
+
+@dataclass
 class Memory:
     memory_id: str
     key: str
@@ -201,6 +232,7 @@ class ExecutionResult:
     evidence_refs: list[str] = field(default_factory=list)
     artifact_refs: list[str] = field(default_factory=list)
     error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -233,13 +265,21 @@ class OutboxMessage:
     idempotency_key: str
     status: str
     created_at: str
+    destination: dict[str, str] = field(default_factory=dict)
+    attempts: int = 0
+    last_attempt_at: str | None = None
+    last_error: str | None = None
+    publication_disposition: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "OutboxMessage":
-        return cls(**value)
+        compatible = {"destination": {}, "attempts": 0, "last_attempt_at": None, "last_error": None,
+                      "publication_disposition": None}
+        compatible.update(value)
+        return cls(**compatible)
 
 
 @dataclass(frozen=True)

@@ -89,6 +89,18 @@ class WorkspaceRuntime:
         env: Mapping[str, str] | None = None,
         execution_id: str | None = None,
     ) -> WorkspaceExecution:
+        with self.manager.execution_lease(workspace_id):
+            return self._run_command(workspace_id, command, cwd=cwd, env=env, execution_id=execution_id)
+
+    def _run_command(
+        self,
+        workspace_id: str,
+        command: Sequence[str],
+        *,
+        cwd: str = "work",
+        env: Mapping[str, str] | None = None,
+        execution_id: str | None = None,
+    ) -> WorkspaceExecution:
         normalized_command = self._normalize_command(command)
         execution_id = execution_id or f"execution-{uuid.uuid4().hex}"
         validate_execution_id(execution_id)

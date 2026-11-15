@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .execution_state import WorkspaceLease
+
 
 WORKSPACE_DIRECTORIES = ("work", "tools", "artifacts", "logs", "state", "cache")
 WORKSPACE_MANIFEST = "workspace.json"
@@ -85,6 +87,14 @@ class WorkspaceManager:
         return self._load(workspace_id)
 
     def restore(self, workspace_id: str) -> Workspace:
+        with self.execution_lease(workspace_id):
+            return self._restore(workspace_id)
+
+    def execution_lease(self, workspace_id: str) -> WorkspaceLease:
+        self._validate_workspace_id(workspace_id)
+        return WorkspaceLease(self.base_directory / ".locks" / f"{workspace_id}.lock")
+
+    def _restore(self, workspace_id: str) -> Workspace:
         workspace = self._load(workspace_id)
         if workspace.status == "deleted":
             raise WorkspaceStateError(f"deleted workspace cannot be restored: {workspace_id}")

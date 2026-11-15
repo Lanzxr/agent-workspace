@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from .models import (
     Approval,
+    AssistantRun,
     AuditEntry,
     Conversation,
     Event,
@@ -164,6 +165,63 @@ class ControlPlane:
         if row is None:
             raise NotFound(f"thread not found: {thread_id}")
         return Thread.from_dict(self.store.decode(row[0]))
+
+    def save_assistant_run(self, run: AssistantRun) -> AssistantRun:
+        if not run.event_id.strip() or not run.status.strip() or not run.policy_version.strip():
+            raise ValueError("assistant run event_id, status and policy_version are required")
+        self.get_event(run.event_id)
+        now = self.now()
+        with self.store.transaction() as connection:
+            row = connection.execute(
+                "SELECT payload FROM assistant_runs WHERE event_id = ?", (run.event_id,)
+            ).fetchone()
+            if row is not None:
+                previous = AssistantRun.from_dict(self.store.decode(row[0]))
+                if previous.work_item_id and previous.work_item_id != run.work_item_id:
+                    raise ControlPlaneError("assistant run cannot change its work item")
+                if previous.policy_version != run.policy_version:
+                    raise ControlPlaneError("assistant run cannot change its policy version")
+                run.created_at = previous.created_at
+            elif not run.created_at:
+                run.created_at = now
+            run.updated_at = now
+            connection.execute(
+                "INSERT INTO assistant_runs(event_id, work_item_id, payload, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET "
+                "work_item_id = excluded.work_item_id, payload = excluded.payload, "
+                "status = excluded.status, updated_at = excluded.updated_at",
+                (run.event_id, run.work_item_id, self.store.encode(run.to_dict()), run.status, run.created_at, now),
+            )
+            self._audit(connection, "assistant_run", run.event_id, f"status:{run.status}", {
+                "event_id": run.event_id,
+                "policy_version": run.policy_version,
+                "decision_id": run.decision_id,
+                "upstream_trigger_id": run.upstream_trigger_id,
+                "work_item_id": run.work_item_id,
+                "plan_id": run.plan_id,
+                "execution_ids": list(run.execution_ids),
+                "auto_authorized": run.auto_authorized,
+                "workspace_id": run.workspace_id,
+                "error_category": run.error_category,
+            }, now)
+        return run
+
+    def get_assistant_run(self, event_id: str) -> AssistantRun:
+        row = self.store.connection.execute(
+            "SELECT payload FROM assistant_runs WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"assistant run not found: {event_id}")
+        return AssistantRun.from_dict(self.store.decode(row[0]))
+
+    def get_assistant_run_for_work_item(self, work_item_id: str) -> AssistantRun:
+        row = self.store.connection.execute(
+            "SELECT payload FROM assistant_runs WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 1",
+            (work_item_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"assistant run not found for work item: {work_item_id}")
+        return AssistantRun.from_dict(self.store.decode(row[0]))
 
     def save_memory(
         self,
@@ -388,7 +446,8 @@ class ControlPlane:
                 approval = self.get_approval(approval_ref)
             except NotFound as error:
                 raise InvalidTransition("approval does not exist") from error
-            if approval.status != "approved" or approval.work_item_id != work_item_id:
+            if (approval.status != "approved" or approval.work_item_id != work_item_id
+                    or approval.scope != capability):
                 raise InvalidTransition("approval is not approved for this work item")
         plan = self._find_plan_for_work_item(work_item_id)
         step = next((candidate for candidate in plan.steps if candidate.step_id == plan_step_id), None)
@@ -443,6 +502,11 @@ class ControlPlane:
         return ExecutionResult(**self.store.decode(row[0]))
 
     def start_execution(self, execution_id: str) -> ExecutionRequest:
+        with self.store.transaction() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._start_execution(connection, execution_id)
+
+    def _start_execution(self, connection: sqlite3.Connection, execution_id: str) -> ExecutionRequest:
         request = self.get_execution(execution_id)
         if request.status != "queued":
             raise InvalidTransition(f"execution is already {request.status}")
@@ -453,20 +517,33 @@ class ControlPlane:
         step.status = "running"
         plan.updated_at = request.updated_at
         item = self.get_work_item(request.work_item_id)
+        if item.status not in {"queued", "running"}:
+            raise InvalidTransition(f"cannot execute work item in {item.status}")
+        if item.risk_class != "low":
+            if not request.approval_ref:
+                raise InvalidTransition("execution requires approval_ref")
+            approval = self.get_approval(request.approval_ref)
+            if (approval.status != "approved" or approval.work_item_id != item.work_item_id
+                    or approval.scope != request.capability):
+                raise InvalidTransition("approval does not authorize this capability")
         if item.status == "queued":
             item.status = "running"
             item.updated_at = request.updated_at
-        with self.store.transaction() as connection:
-            connection.execute(
-                "UPDATE executions SET payload = ?, status = ?, updated_at = ? WHERE execution_id = ?",
-                (self.store.encode(request.to_dict()), request.status, request.updated_at, execution_id),
-            )
-            self._save_plan(connection, plan)
-            self._save_work_item(connection, item)
-            self._audit(connection, "execution", execution_id, "started", {}, request.updated_at)
+        connection.execute(
+            "UPDATE executions SET payload = ?, status = ?, updated_at = ? WHERE execution_id = ?",
+            (self.store.encode(request.to_dict()), request.status, request.updated_at, execution_id),
+        )
+        self._save_plan(connection, plan)
+        self._save_work_item(connection, item)
+        self._audit(connection, "execution", execution_id, "started", {}, request.updated_at)
         return request
 
     def record_execution_result(self, result: ExecutionResult) -> ExecutionRequest:
+        with self.store.transaction() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._record_execution_result(connection, result)
+
+    def _record_execution_result(self, connection: sqlite3.Connection, result: ExecutionResult) -> ExecutionRequest:
         request = self.get_execution(result.execution_id)
         if request.status != "running":
             raise InvalidTransition(f"execution is {request.status}")
@@ -480,24 +557,24 @@ class ControlPlane:
         step.status = "completed" if result.status == "succeeded" else "failed"
         plan.updated_at = now
         item = self.get_work_item(request.work_item_id)
-        if result.status == "succeeded" and all(candidate.status == "completed" for candidate in plan.steps):
+        if (item.status == "running" and result.status == "succeeded"
+                and all(candidate.status == "completed" for candidate in plan.steps)):
             item.status = "completed"
             item.updated_at = now
-        elif result.status != "succeeded":
+        elif item.status == "running" and result.status != "succeeded":
             item.status = "failed"
             item.updated_at = now
-        with self.store.transaction() as connection:
-            connection.execute(
-                "UPDATE executions SET payload = ?, status = ?, updated_at = ? WHERE execution_id = ?",
-                (self.store.encode(request.to_dict()), request.status, now, request.execution_id),
-            )
-            connection.execute(
-                "INSERT OR REPLACE INTO execution_results(execution_id, payload, created_at) VALUES (?, ?, ?)",
-                (result.execution_id, self.store.encode(result.to_dict()), now),
-            )
-            self._save_plan(connection, plan)
-            self._save_work_item(connection, item)
-            self._audit(connection, "execution", result.execution_id, f"result:{result.status}", {}, now)
+        connection.execute(
+            "UPDATE executions SET payload = ?, status = ?, updated_at = ? WHERE execution_id = ?",
+            (self.store.encode(request.to_dict()), request.status, now, request.execution_id),
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO execution_results(execution_id, payload, created_at) VALUES (?, ?, ?)",
+            (result.execution_id, self.store.encode(result.to_dict()), now),
+        )
+        self._save_plan(connection, plan)
+        self._save_work_item(connection, item)
+        self._audit(connection, "execution", result.execution_id, f"result:{result.status}", {}, now)
         return request
 
     def decide_publication(
@@ -511,6 +588,7 @@ class ControlPlane:
         policy_version: str,
         body: str,
         idempotency_key: str,
+        destination: dict[str, str] | None = None,
     ) -> PublicationDecision:
         self.get_work_item(work_item_id)
         self.get_conversation(conversation_id)
@@ -520,6 +598,10 @@ class ControlPlane:
             raise ValueError(f"unsupported publication disposition: {disposition}")
         if disposition != "suppress" and not body.strip():
             raise ValueError("published messages require a body")
+        if destination is not None and any(not isinstance(key, str) or not key.strip()
+                                           or not isinstance(value, str) or not value.strip()
+                                           for key, value in destination.items()):
+            raise ValueError("publication destination must contain non-empty string fields")
         now = self.now()
         outbox_id = None if disposition == "suppress" else self.new_id("outbox")
         decision = PublicationDecision(
@@ -551,7 +633,8 @@ class ControlPlane:
                     return PublicationDecision.from_dict(self.store.decode(existing[0]))
                 raise
             if outbox_id:
-                message = OutboxMessage(outbox_id, conversation_id, body, idempotency_key, "pending", now)
+                message = OutboxMessage(outbox_id, conversation_id, body, idempotency_key, "pending", now,
+                                        destination or {}, publication_disposition=disposition)
                 connection.execute(
                     "INSERT INTO outbox(outbox_id, idempotency_key, payload, status, created_at) VALUES (?, ?, ?, ?, ?)",
                     (outbox_id, idempotency_key, self.store.encode(message.to_dict()), message.status, now),
@@ -563,23 +646,60 @@ class ControlPlane:
         rows = self.store.connection.execute("SELECT payload FROM outbox ORDER BY rowid").fetchall()
         return [OutboxMessage.from_dict(self.store.decode(row[0])) for row in rows]
 
-    def mark_outbox_sent(self, outbox_id: str) -> OutboxMessage:
-        row = self.store.connection.execute(
-            "SELECT payload FROM outbox WHERE outbox_id = ?", (outbox_id,)
-        ).fetchone()
-        if row is None:
-            raise NotFound(f"outbox message not found: {outbox_id}")
-        message = OutboxMessage.from_dict(self.store.decode(row[0]))
-        if message.status not in {"pending", "failed"}:
-            raise InvalidTransition(f"outbox is already {message.status}")
-        message.status = "sent"
+    def _transition_outbox(self, outbox_id: str, expected: set[str], status: str, action: str,
+                           update: Any | None = None) -> OutboxMessage:
         with self.store.transaction() as connection:
+            expected_states = tuple(sorted(expected))
+            placeholders = ", ".join("?" for _ in expected_states)
+            changed = connection.execute(
+                f"UPDATE outbox SET status = ? WHERE outbox_id = ? AND status IN ({placeholders})",
+                (status, outbox_id, *expected_states),
+            ).rowcount
+            if changed != 1:
+                row = connection.execute(
+                    "SELECT status FROM outbox WHERE outbox_id = ?", (outbox_id,)
+                ).fetchone()
+                if row is None:
+                    raise NotFound(f"outbox message not found: {outbox_id}")
+                raise InvalidTransition(f"outbox is {row[0]}; expected {', '.join(expected_states)}")
+            row = connection.execute(
+                "SELECT payload FROM outbox WHERE outbox_id = ?", (outbox_id,)
+            ).fetchone()
+            message = OutboxMessage.from_dict(self.store.decode(row[0]))
+            message.status = status
+            if update is not None:
+                update(message)
             connection.execute(
-                "UPDATE outbox SET payload = ?, status = ? WHERE outbox_id = ?",
-                (self.store.encode(message.to_dict()), message.status, outbox_id),
+                "UPDATE outbox SET payload = ? WHERE outbox_id = ? AND status = ?",
+                (self.store.encode(message.to_dict()), outbox_id, status),
             )
-            self._audit(connection, "outbox", outbox_id, "sent", {}, self.now())
-        return message
+            self._audit(connection, "outbox", outbox_id, action, {"attempts": message.attempts}, self.now())
+            return message
+
+    def mark_outbox_attempt(self, outbox_id: str) -> OutboxMessage:
+        def begin(message: OutboxMessage) -> None:
+            message.attempts += 1
+            message.last_attempt_at = self.now()
+            message.last_error = None
+
+        return self._transition_outbox(outbox_id, {"pending", "failed"}, "sending", "sending", begin)
+
+    def mark_outbox_failed(self, outbox_id: str, error: str) -> OutboxMessage:
+        return self._transition_outbox(outbox_id, {"sending"}, "failed", "failed",
+                                       lambda message: setattr(message, "last_error", error[:500]))
+
+    def mark_outbox_sent(self, outbox_id: str) -> OutboxMessage:
+        return self._transition_outbox(outbox_id, {"sending"}, "sent", "sent")
+
+    def cancel_outbox(self, outbox_id: str, reason: str) -> OutboxMessage:
+        return self._transition_outbox(outbox_id, {"pending", "failed"}, "cancelled", "cancelled",
+                                       lambda message: setattr(message, "last_error", reason[:500]))
+
+    def resolve_outbox_delivery(self, outbox_id: str, *, delivered: bool) -> OutboxMessage:
+        status = "sent" if delivered else "pending"
+        action = "manually_confirmed_sent" if delivered else "manually_requeued"
+        return self._transition_outbox(outbox_id, {"sending"}, status, action,
+                                       lambda message: setattr(message, "last_error", None))
 
     def recover_unfinished(self) -> None:
         rows = self.store.connection.execute(
@@ -587,6 +707,9 @@ class ControlPlane:
         ).fetchall()
         for row in rows:
             request = ExecutionRequest.from_dict(self.store.decode(row[0]))
+            if request.capability == "dsh.task":
+                # The dispatcher reconciles durable receipts under a live Workspace lease.
+                continue
             now = self.now()
             request.status = "queued"
             request.updated_at = now
