@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from .models import (
     Approval,
+    AssistantRun,
     AuditEntry,
     Conversation,
     Event,
@@ -164,6 +165,63 @@ class ControlPlane:
         if row is None:
             raise NotFound(f"thread not found: {thread_id}")
         return Thread.from_dict(self.store.decode(row[0]))
+
+    def save_assistant_run(self, run: AssistantRun) -> AssistantRun:
+        if not run.event_id.strip() or not run.status.strip() or not run.policy_version.strip():
+            raise ValueError("assistant run event_id, status and policy_version are required")
+        self.get_event(run.event_id)
+        now = self.now()
+        with self.store.transaction() as connection:
+            row = connection.execute(
+                "SELECT payload FROM assistant_runs WHERE event_id = ?", (run.event_id,)
+            ).fetchone()
+            if row is not None:
+                previous = AssistantRun.from_dict(self.store.decode(row[0]))
+                if previous.work_item_id and previous.work_item_id != run.work_item_id:
+                    raise ControlPlaneError("assistant run cannot change its work item")
+                if previous.policy_version != run.policy_version:
+                    raise ControlPlaneError("assistant run cannot change its policy version")
+                run.created_at = previous.created_at
+            elif not run.created_at:
+                run.created_at = now
+            run.updated_at = now
+            connection.execute(
+                "INSERT INTO assistant_runs(event_id, work_item_id, payload, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET "
+                "work_item_id = excluded.work_item_id, payload = excluded.payload, "
+                "status = excluded.status, updated_at = excluded.updated_at",
+                (run.event_id, run.work_item_id, self.store.encode(run.to_dict()), run.status, run.created_at, now),
+            )
+            self._audit(connection, "assistant_run", run.event_id, f"status:{run.status}", {
+                "event_id": run.event_id,
+                "policy_version": run.policy_version,
+                "decision_id": run.decision_id,
+                "upstream_trigger_id": run.upstream_trigger_id,
+                "work_item_id": run.work_item_id,
+                "plan_id": run.plan_id,
+                "execution_ids": list(run.execution_ids),
+                "auto_authorized": run.auto_authorized,
+                "workspace_id": run.workspace_id,
+                "error_category": run.error_category,
+            }, now)
+        return run
+
+    def get_assistant_run(self, event_id: str) -> AssistantRun:
+        row = self.store.connection.execute(
+            "SELECT payload FROM assistant_runs WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"assistant run not found: {event_id}")
+        return AssistantRun.from_dict(self.store.decode(row[0]))
+
+    def get_assistant_run_for_work_item(self, work_item_id: str) -> AssistantRun:
+        row = self.store.connection.execute(
+            "SELECT payload FROM assistant_runs WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 1",
+            (work_item_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"assistant run not found for work item: {work_item_id}")
+        return AssistantRun.from_dict(self.store.decode(row[0]))
 
     def save_memory(
         self,

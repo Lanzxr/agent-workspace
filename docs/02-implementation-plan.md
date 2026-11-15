@@ -54,7 +54,11 @@
 - 回传执行结果，支持会话恢复和失败重试。
 - 验证静默观察、无明确指令形成工作意图和发布建议。
 
+当前进度：已实现 loopback-only DSSuperAgent Adapter 和 `DssuperAgentWorkflow`。标准事件经上游 Source/Trigger/Thread/Eval/Decision 后映射为持久 AssistantRun、Work Item 和 Plan；默认策略只提出、不自动执行，后端显式 allowlist 才能让低风险能力进入 DSH。高风险执行仍经审批，执行结果作为稳定 ID 的事件回传上游，发布建议只保存、不外发。上游桥接补丁固定基线并纳入 [`patches/dssuperagent-company-agent-step4.patch`](../patches/dssuperagent-company-agent-step4.patch)，真实运行验收证据见 [`05-step4-dssuperagent.md`](05-step4-dssuperagent.md)。
+
 完成条件：完整链路经过 DSSuperAgent、控制面、DSH 和 Workspace。
+
+剩余工作：与渠道入口组合、配置化策略管理和发布 Outbox 集成属于 Step 5；安装包和 Linux 级资源配额属于后续步骤。
 
 ## Step 5：接入渠道和主动发布
 

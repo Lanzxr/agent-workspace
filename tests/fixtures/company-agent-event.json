@@ -1,0 +1,11 @@
+{
+  "event_id": "step4-discount-discussion-001",
+  "source_type": "chat",
+  "source_id": "local-dev",
+  "conversation_id": "step4-discount-discussion",
+  "actor_id": "local-operator",
+  "occurred_at": "2026-11-15T00:00:00Z",
+  "content": "A group is debating whether to discount by 10% or 15%. Some members think 15% is fine; others worry about profit. No one has asked the assistant to analyze it. Historical revenue, campaign results and margin data are not attached.",
+  "attachments": [],
+  "capabilities": ["dsh.task"]
+}

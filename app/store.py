@@ -42,6 +42,15 @@ class Store:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS assistant_runs (
+                event_id TEXT PRIMARY KEY,
+                work_item_id TEXT,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS assistant_runs_work_item_idx ON assistant_runs(work_item_id);
             CREATE TABLE IF NOT EXISTS memories (
                 memory_id TEXT PRIMARY KEY,
                 memory_key TEXT NOT NULL,
