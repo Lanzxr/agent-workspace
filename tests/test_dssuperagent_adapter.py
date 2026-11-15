@@ -51,7 +51,8 @@ class DssuperAgentAdapterTests(unittest.TestCase):
     @staticmethod
     def event() -> Event:
         return Event("event-1", "chat", "channel-1", "conversation-1", "user-1",
-                     "2026-11-15T00:00:00+00:00", "Please review this discussion.", [], ["dsh.task"])
+                     "2026-11-15T00:00:00+00:00", "Please review this discussion.", [], ["dsh.task"],
+                     external_actor_id="platform-private-id")
 
     def test_submit_posts_normalized_event_and_keeps_stable_upstream_identity(self) -> None:
         receipt = self.adapter.submit_event(self.event(), context=[{"actor_id": "user-2", "content": "Earlier context"}])
@@ -61,6 +62,7 @@ class DssuperAgentAdapterTests(unittest.TestCase):
         self.assertEqual(headers["x-orchestrator-request"], "1")
         self.assertEqual(body["event_id"], "event-1")
         self.assertEqual(body["context"][0]["content"], "Earlier context")
+        self.assertNotIn("external_actor_id", body)
         self.assertEqual(receipt.trigger_id, "company-agent:event-1")
         self.assertEqual(receipt.thread_key, "company-agent:conversation-1")
 

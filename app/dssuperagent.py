@@ -74,6 +74,7 @@ class DssuperAgentAdapter:
     def submit_event(self, event: Event, *, context: list[dict[str, Any]] | None = None) -> DssuperAgentReceipt:
         self._validate_event(event, context or [])
         value = event.to_dict()
+        value.pop("external_actor_id", None)
         value["context"] = context or []
         body = self._request("POST", "/orchestrator/api/company-agent/events", value)
         status = body.get("status")

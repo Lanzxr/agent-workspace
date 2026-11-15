@@ -15,6 +15,7 @@ class Event:
     content: str
     attachments: list[dict[str, Any]]
     capabilities: list[str]
+    external_actor_id: str | None = None
 
     def __post_init__(self) -> None:
         required = {

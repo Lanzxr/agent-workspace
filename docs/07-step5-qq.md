@@ -23,7 +23,7 @@ The QQ path does not authorize DSH execution. `qq-serve` uses the default workfl
 
 ## Configuration and start
 
-Copy `runtime.env.example` to a private runtime configuration file and set `QQBOT_APP_ID` and `QQBOT_CLIENT_SECRET`. Leave `QQBOT_ALLOWED_PUBLICATIONS` empty to keep all outbound group messages suppressed. To enable a specific disposition, set for example `QQBOT_ALLOWED_PUBLICATIONS=group_update`.
+Copy `runtime.env.example` to a private runtime configuration file and set `QQBOT_APP_ID` and `QQBOT_CLIENT_SECRET`. The OpenAPI base URL defaults to `https://api.bot.qq.com`; set `QQBOT_API_BASE_URL` only when the platform provides a different environment-specific endpoint. Leave `QQBOT_ALLOWED_PUBLICATIONS` empty to keep all outbound group messages suppressed. To enable a specific disposition, set for example `QQBOT_ALLOWED_PUBLICATIONS=group_update`.
 
 Install dependencies and start the adapter after DSSuperAgent is reachable on loopback:
 

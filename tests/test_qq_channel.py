@@ -65,6 +65,7 @@ class QQConfigTests(unittest.TestCase):
             self.assertEqual(settings.app_id, "app")
             self.assertEqual(settings.client_secret, "secret")
             self.assertEqual(settings.allowed_publications, frozenset())
+            self.assertEqual(settings.api_base_url, "https://api.bot.qq.com")
 
     def test_publication_allowlist_defaults_to_empty_and_accepts_supported_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -196,7 +197,7 @@ class QQApiTests(unittest.TestCase):
         api.send_group_message(message)
         args, kwargs = api._request.call_args
         self.assertEqual(args[0], "POST")
-        self.assertEqual(args[1], "https://api.sgroup.qq.com/v2/groups/group%2Fa/messages")
+        self.assertEqual(args[1], "https://api.bot.qq.com/v2/groups/group%2Fa/messages")
         self.assertEqual(kwargs["body"], {"msg_type": 0, "content": "Update", "msg_id": "msg-1"})
         self.assertEqual(kwargs["token"], "access-token")
 
