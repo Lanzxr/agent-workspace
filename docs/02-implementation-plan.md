@@ -58,14 +58,16 @@
 
 完成条件：完整链路经过 DSSuperAgent、控制面、DSH 和 Workspace。
 
-剩余工作：与渠道入口组合、配置化策略管理和发布 Outbox 集成属于 Step 5；安装包和 Linux 级资源配额属于后续步骤。
+当前 Step 5 已通过 QQ 完成首个渠道接入和 Outbox 投递闭环；更广泛的渠道支持与策略管理界面属于后续扩展。安装包和 Linux 级资源配额也属于后续步骤。
 
 ## Step 5：接入渠道和主动发布
 
-- 先保持 Web 和事件适配器作为开发入口。
-- 接入第一个企业通讯渠道。
-- 所有外发都经 Publication Decision 和 Outbox。
-- 用多个领域夹具验证同一套通用链路。
+- 已接入 QQ Bot Gateway 和群消息 API，直接连接 Company Agent QQ Channel Adapter。
+- 群消息映射为标准事件并进入 DSSuperAgent 工作流；默认只形成提案，不授权 DSH 执行。
+- 外发建议经显式 QQ 发布白名单、Publication Decision 和 Outbox；未配置白名单时不发送群消息。
+- 本地测试覆盖事件标准化、幂等、白名单、Outbox 失败重试与 Gateway 控制帧。真实 QQ Gateway 和真实群发送仍需部署验收。
+
+详细配置和运行方式见 [`07-step5-qq.md`](07-step5-qq.md)。
 
 完成条件：渠道只负责传输，任务状态和发布决定仍由控制面保存。
 
@@ -84,4 +86,3 @@
 - HTTP 兼容模型连接不能标记 DSH 已通过。
 - 一次命令成功不能标记 Workspace 重启恢复已通过。
 - 业务案例只能作为夹具，不能改变核心数据模型。
-

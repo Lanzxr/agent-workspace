@@ -13,6 +13,36 @@ POLICY_VERSION = "workspace-dev-v1"
 
 
 @dataclass(frozen=True)
+class QQBotSettings:
+    app_id: str
+    client_secret: str = field(repr=False)
+    allowed_publications: frozenset[str] = frozenset()
+    api_base_url: str = "https://api.sgroup.qq.com"
+
+    @classmethod
+    def load(cls, path: Path) -> "QQBotSettings":
+        if not path.is_file():
+            raise ValueError(f"runtime configuration not found: {path}")
+        values = RuntimeConfig._parse_env(path)
+        app_id = (values.get("QQBOT_APP_ID") or "").strip()
+        client_secret = (values.get("QQBOT_CLIENT_SECRET") or "").strip()
+        if not app_id or not client_secret:
+            raise ValueError("QQBOT_APP_ID and QQBOT_CLIENT_SECRET are required")
+        if any(character in app_id + client_secret for character in "\r\n\x00"):
+            raise ValueError("QQ bot credentials must be single-line values")
+        allowed = frozenset(value.strip() for value in values.get("QQBOT_ALLOWED_PUBLICATIONS", "").split(",")
+                            if value.strip())
+        supported = {"group_update", "urgent_escalation"}
+        if not allowed.issubset(supported):
+            raise ValueError("QQBOT_ALLOWED_PUBLICATIONS supports group_update and urgent_escalation")
+        api_base_url = (values.get("QQBOT_API_BASE_URL") or "https://api.sgroup.qq.com").strip().rstrip("/")
+        parsed = urlsplit(api_base_url)
+        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("QQBOT_API_BASE_URL must be an HTTPS base URL without credentials or query")
+        return cls(app_id, client_secret, allowed, api_base_url)
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     model_url: str
     model_name: str

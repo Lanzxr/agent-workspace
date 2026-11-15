@@ -588,6 +588,7 @@ class ControlPlane:
         policy_version: str,
         body: str,
         idempotency_key: str,
+        destination: dict[str, str] | None = None,
     ) -> PublicationDecision:
         self.get_work_item(work_item_id)
         self.get_conversation(conversation_id)
@@ -597,6 +598,10 @@ class ControlPlane:
             raise ValueError(f"unsupported publication disposition: {disposition}")
         if disposition != "suppress" and not body.strip():
             raise ValueError("published messages require a body")
+        if destination is not None and any(not isinstance(key, str) or not key.strip()
+                                           or not isinstance(value, str) or not value.strip()
+                                           for key, value in destination.items()):
+            raise ValueError("publication destination must contain non-empty string fields")
         now = self.now()
         outbox_id = None if disposition == "suppress" else self.new_id("outbox")
         decision = PublicationDecision(
@@ -628,7 +633,8 @@ class ControlPlane:
                     return PublicationDecision.from_dict(self.store.decode(existing[0]))
                 raise
             if outbox_id:
-                message = OutboxMessage(outbox_id, conversation_id, body, idempotency_key, "pending", now)
+                message = OutboxMessage(outbox_id, conversation_id, body, idempotency_key, "pending", now,
+                                        destination or {}, publication_disposition=disposition)
                 connection.execute(
                     "INSERT INTO outbox(outbox_id, idempotency_key, payload, status, created_at) VALUES (?, ?, ?, ?, ?)",
                     (outbox_id, idempotency_key, self.store.encode(message.to_dict()), message.status, now),
@@ -640,23 +646,60 @@ class ControlPlane:
         rows = self.store.connection.execute("SELECT payload FROM outbox ORDER BY rowid").fetchall()
         return [OutboxMessage.from_dict(self.store.decode(row[0])) for row in rows]
 
-    def mark_outbox_sent(self, outbox_id: str) -> OutboxMessage:
-        row = self.store.connection.execute(
-            "SELECT payload FROM outbox WHERE outbox_id = ?", (outbox_id,)
-        ).fetchone()
-        if row is None:
-            raise NotFound(f"outbox message not found: {outbox_id}")
-        message = OutboxMessage.from_dict(self.store.decode(row[0]))
-        if message.status not in {"pending", "failed"}:
-            raise InvalidTransition(f"outbox is already {message.status}")
-        message.status = "sent"
+    def _transition_outbox(self, outbox_id: str, expected: set[str], status: str, action: str,
+                           update: Any | None = None) -> OutboxMessage:
         with self.store.transaction() as connection:
+            expected_states = tuple(sorted(expected))
+            placeholders = ", ".join("?" for _ in expected_states)
+            changed = connection.execute(
+                f"UPDATE outbox SET status = ? WHERE outbox_id = ? AND status IN ({placeholders})",
+                (status, outbox_id, *expected_states),
+            ).rowcount
+            if changed != 1:
+                row = connection.execute(
+                    "SELECT status FROM outbox WHERE outbox_id = ?", (outbox_id,)
+                ).fetchone()
+                if row is None:
+                    raise NotFound(f"outbox message not found: {outbox_id}")
+                raise InvalidTransition(f"outbox is {row[0]}; expected {', '.join(expected_states)}")
+            row = connection.execute(
+                "SELECT payload FROM outbox WHERE outbox_id = ?", (outbox_id,)
+            ).fetchone()
+            message = OutboxMessage.from_dict(self.store.decode(row[0]))
+            message.status = status
+            if update is not None:
+                update(message)
             connection.execute(
-                "UPDATE outbox SET payload = ?, status = ? WHERE outbox_id = ?",
-                (self.store.encode(message.to_dict()), message.status, outbox_id),
+                "UPDATE outbox SET payload = ? WHERE outbox_id = ? AND status = ?",
+                (self.store.encode(message.to_dict()), outbox_id, status),
             )
-            self._audit(connection, "outbox", outbox_id, "sent", {}, self.now())
-        return message
+            self._audit(connection, "outbox", outbox_id, action, {"attempts": message.attempts}, self.now())
+            return message
+
+    def mark_outbox_attempt(self, outbox_id: str) -> OutboxMessage:
+        def begin(message: OutboxMessage) -> None:
+            message.attempts += 1
+            message.last_attempt_at = self.now()
+            message.last_error = None
+
+        return self._transition_outbox(outbox_id, {"pending", "failed"}, "sending", "sending", begin)
+
+    def mark_outbox_failed(self, outbox_id: str, error: str) -> OutboxMessage:
+        return self._transition_outbox(outbox_id, {"sending"}, "failed", "failed",
+                                       lambda message: setattr(message, "last_error", error[:500]))
+
+    def mark_outbox_sent(self, outbox_id: str) -> OutboxMessage:
+        return self._transition_outbox(outbox_id, {"sending"}, "sent", "sent")
+
+    def cancel_outbox(self, outbox_id: str, reason: str) -> OutboxMessage:
+        return self._transition_outbox(outbox_id, {"pending", "failed"}, "cancelled", "cancelled",
+                                       lambda message: setattr(message, "last_error", reason[:500]))
+
+    def resolve_outbox_delivery(self, outbox_id: str, *, delivered: bool) -> OutboxMessage:
+        status = "sent" if delivered else "pending"
+        action = "manually_confirmed_sent" if delivered else "manually_requeued"
+        return self._transition_outbox(outbox_id, {"sending"}, status, action,
+                                       lambda message: setattr(message, "last_error", None))
 
     def recover_unfinished(self) -> None:
         rows = self.store.connection.execute(

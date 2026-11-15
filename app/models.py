@@ -265,13 +265,21 @@ class OutboxMessage:
     idempotency_key: str
     status: str
     created_at: str
+    destination: dict[str, str] = field(default_factory=dict)
+    attempts: int = 0
+    last_attempt_at: str | None = None
+    last_error: str | None = None
+    publication_disposition: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "OutboxMessage":
-        return cls(**value)
+        compatible = {"destination": {}, "attempts": 0, "last_attempt_at": None, "last_error": None,
+                      "publication_disposition": None}
+        compatible.update(value)
+        return cls(**compatible)
 
 
 @dataclass(frozen=True)

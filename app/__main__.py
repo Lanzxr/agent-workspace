@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -13,7 +14,8 @@ from .dssuperagent import DssuperAgentAdapter, DssuperAgentError
 from .execution import ExecutionDispatcher
 from .execution_state import ExecutionBusy, private_directory
 from .models import Event, PlanStep
-from .runtime_config import RuntimeConfig
+from .qq_channel import QQBotAPI, QQChannelService, QQGateway
+from .runtime_config import QQBotSettings, RuntimeConfig
 from .workspace import WorkspaceError, WorkspaceManager
 
 
@@ -41,6 +43,18 @@ def main() -> int:
     assistant_event.add_argument("--auto-execute-capability", action="append", default=[])
     assistant_event.add_argument("--config", type=Path, default=Path.home() / ".config/company-agent/runtime.env")
     assistant_event.add_argument("--decision-timeout", type=float, default=120)
+    qq_serve = commands.add_parser("qq-serve", help="Receive QQ group events through Company Agent")
+    qq_serve.add_argument("--config", type=Path, default=Path.home() / ".config/company-agent/runtime.env")
+    qq_serve.add_argument("--dssuperagent-url", default="http://127.0.0.1:3082")
+    qq_serve.add_argument("--decision-timeout", type=float, default=120)
+    outbox = commands.add_parser("outbox", help="Inspect or manually resolve uncertain outbound messages")
+    outbox_commands = outbox.add_subparsers(dest="outbox_command", required=True)
+    outbox_commands.add_parser("list", help="List outbound message states")
+    resolve_outbox = outbox_commands.add_parser("resolve", help="Confirm or retry a message left in sending state")
+    resolve_outbox.add_argument("outbox_id")
+    resolution = resolve_outbox.add_mutually_exclusive_group(required=True)
+    resolution.add_argument("--delivered", action="store_true", help="Confirm QQ received the message")
+    resolution.add_argument("--retry", action="store_true", help="Confirm it was not delivered and retry")
     arguments = parser.parse_args()
     plane = None
     try:
@@ -51,6 +65,26 @@ def main() -> int:
             print(json.dumps(manager.summary(arguments.workspace_id), ensure_ascii=False, indent=2))
             return 0
         plane = ControlPlane.open(data_directory / "control.sqlite")
+        if arguments.command == "outbox":
+            if arguments.outbox_command == "list":
+                print(json.dumps([message.to_dict() for message in plane.list_outbox()], ensure_ascii=False, indent=2))
+                return 0
+            message = plane.resolve_outbox_delivery(arguments.outbox_id, delivered=arguments.delivered)
+            print(json.dumps(message.to_dict(), ensure_ascii=False, indent=2))
+            return 0
+        if arguments.command == "qq-serve":
+            settings = QQBotSettings.load(arguments.config)
+            api = QQBotAPI(settings)
+            service = QQChannelService(
+                plane,
+                DssuperAgentWorkflow(plane, DssuperAgentAdapter(arguments.dssuperagent_url),
+                                     decision_timeout=arguments.decision_timeout),
+                api,
+                settings,
+            )
+            service.flush_outbox()
+            asyncio.run(QQGateway(api, service.handle_gateway_event).run_forever())
+            return 0
         if arguments.command == "assistant-event":
             event_value = json.loads(arguments.event_file.read_text(encoding="utf-8-sig"))
             if not isinstance(event_value, dict):
@@ -120,7 +154,8 @@ def main() -> int:
             saved = ExecutionDispatcher(plane, manager, adapter, data_directory / "runtime").dispatch(arguments.execution_id)
         print(json.dumps(saved.to_dict(), ensure_ascii=False, indent=2))
         return 0 if saved.status == "succeeded" else 1
-    except (ValueError, OSError, ControlPlaneError, WorkspaceError, ExecutionBusy, DssuperAgentError) as error:
+    except (ValueError, OSError, ControlPlaneError, WorkspaceError, ExecutionBusy, DssuperAgentError,
+            RuntimeError) as error:
         print(f"company-agent: {error}", file=sys.stderr)
         return 2
     finally:
