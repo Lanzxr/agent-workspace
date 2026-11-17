@@ -291,19 +291,6 @@ class AttachmentIngestor:
                 (payload["attachment_id"], payload["event_id"], json.dumps(payload, ensure_ascii=False), now),
             )
 
-
-def _looks_sensitive(filename: str) -> bool:
-    name = Path(filename).name.lower()
-    return name == ".env" or name.startswith(".env.")
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
     def _download(self, url: str) -> bytes:
         parsed = urlsplit(url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -343,12 +330,18 @@ def _sha256_file(path: Path) -> str:
                 output.write(chunk)
         return total
 
-    def _save(self, record: AttachmentRecord, payload: dict) -> None:
-        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
-        with self.store.transaction() as connection:
-            connection.execute("INSERT INTO attachments(attachment_id,event_id,payload,created_at) VALUES (?,?,?,?)",
-                               (record.attachment_id, record.event_id,
-                                json.dumps(payload, ensure_ascii=False), now))
+
+def _looks_sensitive(filename: str) -> bool:
+    name = Path(filename).name.lower()
+    return name == ".env" or name.startswith(".env.")
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def extract_text(data: bytes, filename: str, content_type: str, max_chars: int = MAX_EXTRACTED_CHARS) -> str:
