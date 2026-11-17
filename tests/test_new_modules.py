@@ -174,6 +174,7 @@ class AttachmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(Path(directory) / "control.sqlite")
             ingestor = AttachmentIngestor(store, storage_directory=Path(directory) / "attachments")
+            self.assertTrue(callable(getattr(AttachmentIngestor, "_download_to", None)))
             ingestor._download_to = lambda url, destination: (destination.write_bytes(b"Report result: 42") or 17)  # type: ignore[method-assign]
             from app.models import Event
             event = Event("event-1", "qq.group", "g", "g", "u", "2026-11-16T00:00:00Z", "Please read",
