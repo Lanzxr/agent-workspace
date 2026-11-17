@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 from app.control_plane import ControlPlane, InvalidTransition
 from app.fake_adapters import DeterministicAssistantAdapter
 from app.models import Event, ExecutionResult, PlanStep
+from app.store import Store
 
 
 class ControlPlaneTests(unittest.TestCase):
@@ -170,6 +172,128 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(first.outbox_id, second.outbox_id)
         self.assertEqual(len(self.plane.list_outbox()), 1)
         self.assertEqual(self.plane.list_outbox()[0].status, "pending")
+
+    def test_event_publication_can_be_queued_without_a_work_item(self) -> None:
+        self.plane.ingest_event(self.event())
+        self.plane.create_conversation(
+            conversation_id="conversation-1",
+            kind="test",
+            participant_refs=["actor-1"],
+            policy_version="policy-1",
+        )
+
+        decision = self.plane.decide_publication(
+            decision_id="event-decision-1",
+            work_item_id=None,
+            conversation_id="conversation-1",
+            disposition="group_update",
+            reason="The requested file is unavailable",
+            policy_version="policy-1",
+            body="The upload failed; please resend the file.",
+            idempotency_key="event-publication-1",
+            destination={"channel": "qq", "group_openid": "group-1"},
+        )
+        duplicate = self.plane.decide_publication(
+            decision_id="event-decision-duplicate",
+            work_item_id=None,
+            conversation_id="conversation-1",
+            disposition="group_update",
+            reason="Duplicate event",
+            policy_version="policy-1",
+            body="A duplicate notice.",
+            idempotency_key="event-publication-1",
+            destination={"channel": "qq", "group_openid": "group-1"},
+        )
+
+        self.assertIsNone(decision.work_item_id)
+        self.assertEqual(duplicate.decision_id, decision.decision_id)
+        self.assertEqual(len(self.plane.list_outbox()), 1)
+        self.assertEqual(self.plane.list_outbox()[0].body, "The upload failed; please resend the file.")
+
+    def test_qq_reply_sequence_is_durable_and_idempotent(self) -> None:
+        self.plane.ingest_event(self.event())
+        self.plane.create_conversation(
+            conversation_id="conversation-1",
+            kind="test",
+            participant_refs=["actor-1"],
+            policy_version="policy-1",
+        )
+        destination = {
+            "channel": "qq",
+            "group_openid": "group-1",
+            "reply_to_message_id": "message-1",
+            "reply_deadline_epoch": "2000000000",
+        }
+        self.plane.decide_publication(
+            decision_id="reply-1", work_item_id=None, conversation_id="conversation-1",
+            disposition="group_update", reason="Progress", policy_version="policy-1",
+            body="Processing", idempotency_key="reply-1", destination=destination,
+        )
+        self.plane.decide_publication(
+            decision_id="reply-1-duplicate", work_item_id=None, conversation_id="conversation-1",
+            disposition="group_update", reason="Retry", policy_version="policy-1",
+            body="Processing", idempotency_key="reply-1", destination=destination,
+        )
+        self.plane.decide_publication(
+            decision_id="reply-2", work_item_id=None, conversation_id="conversation-1",
+            disposition="group_update", reason="Result", policy_version="policy-1",
+            body="Done", idempotency_key="reply-2", destination=destination,
+        )
+
+        messages = self.plane.list_outbox()
+        self.assertEqual([item.destination["msg_seq"] for item in messages], ["1", "2"])
+        self.assertEqual(messages[0].destination["reply_to_message_id"], "message-1")
+
+    def test_expired_qq_reply_does_not_consume_a_passive_sequence(self) -> None:
+        self.plane.ingest_event(self.event())
+        self.plane.create_conversation(
+            conversation_id="conversation-1",
+            kind="test",
+            participant_refs=["actor-1"],
+            policy_version="policy-1",
+        )
+        self.plane.decide_publication(
+            decision_id="expired-reply", work_item_id=None, conversation_id="conversation-1",
+            disposition="group_update", reason="Late result", policy_version="policy-1",
+            body="Done", idempotency_key="expired-reply",
+            destination={"channel": "qq", "group_openid": "group-1", "reply_to_message_id": "old-message",
+                         "reply_deadline_epoch": "1"},
+        )
+
+        self.assertNotIn("msg_seq", self.plane.list_outbox()[0].destination)
+        self.assertIsNone(self.plane.store.connection.execute(
+            "SELECT last_sequence FROM qq_reply_sequences WHERE reply_message_id = ?", ("old-message",)
+        ).fetchone())
+
+    def test_publication_schema_migrates_legacy_required_work_item_column(self) -> None:
+        path = Path(self.temp_dir.name) / "legacy.sqlite"
+        payload = (
+            '{"decision_id":"legacy-decision","work_item_id":"legacy-work",'
+            '"conversation_id":"legacy-conversation","disposition":"suppress",'
+            '"reason":"legacy","policy_version":"v1","outbox_id":null,"created_at":"now"}'
+        )
+        with sqlite3.connect(path) as legacy:
+            legacy.execute(
+                "CREATE TABLE publication_decisions (decision_id TEXT PRIMARY KEY, "
+                "work_item_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, "
+                "payload TEXT NOT NULL, created_at TEXT NOT NULL)"
+            )
+            legacy.execute(
+                "INSERT INTO publication_decisions VALUES (?, ?, ?, ?, ?)",
+                ("legacy-decision", "legacy-work", "legacy-key", payload, "now"),
+            )
+        legacy.close()
+
+        upgraded = Store(path)
+        try:
+            columns = {row[1]: row for row in upgraded.connection.execute("PRAGMA table_info(publication_decisions)")}
+            saved = upgraded.connection.execute(
+                "SELECT payload FROM publication_decisions WHERE decision_id = ?", ("legacy-decision",)
+            ).fetchone()
+            self.assertEqual(columns["work_item_id"][3], 0)
+            self.assertEqual(saved[0], payload)
+        finally:
+            upgraded.close()
 
     def test_adapter_creates_a_proposed_item_and_context_records_are_persisted(self) -> None:
         conversation = self.plane.create_conversation(

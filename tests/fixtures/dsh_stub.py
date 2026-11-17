@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -28,7 +29,20 @@ if scenario not in {"missing-artifact", "provider-error", "missing-final"}:
     for name in task["expected_artifacts"]:
         output = Path("artifacts") / name
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text('{"total": 42}')
+        prompt = task.get("prompt", "")
+        contract = task.get("execution_contract", "")
+        instructions = prompt + "\n" + contract
+        begin = re.search(r"<!-- COMPANY_AGENT_FINAL_REPLY_BEGIN:[A-Za-z0-9_-]+ -->", instructions)
+        end = re.search(r"<!-- COMPANY_AGENT_FINAL_REPLY_END:[A-Za-z0-9_-]+ -->", instructions)
+        if "missing-reply-contract" in prompt:
+            output.write_text("Internal execution notes without a user reply block.")
+        elif begin and end:
+            output.write_text(
+                "Internal execution notes.\n\n"
+                + begin.group(0) + "\nFixture final answer.\n" + end.group(0) + "\n"
+            )
+        else:
+            output.write_text('{"total": 42}')
 print(json.dumps({"type": "tool_result", "callId": "call-1", "status": "completed", "result": "done"}))
 if scenario == "missing-final":
     raise SystemExit(0)

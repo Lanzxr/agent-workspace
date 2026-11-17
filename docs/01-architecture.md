@@ -17,6 +17,7 @@ Company Agent 是一个通用的自主助理平台。它让团队继续使用原
 - 记忆、证据、结果和审计
 - 调度、重试、租约和恢复
 - 发布判断、Outbox 和渠道适配
+- 外部资料库的来源登记、会话权限验证、查询授权和 DSH 文件交付
 
 控制面保持业务中立。任何业务数据都通过扩展契约接入。
 
@@ -47,11 +48,15 @@ Workspace 是为 DSSuperAgent 和 DSH 补齐的独立工作环境。它提供 Li
         ↓
 DSSuperAgent 静默判断
         ↓
+Company Agent 按会话权限向 DSSuperAgent 提供 AnythingLLM 检索工具
+        ↓
 工作意图 / 计划 / 执行请求提案
         ↓
 控制面校验权限、风险、资源和审批
         ↓
-DSH 在 Agent Workspace 执行
+Company Agent 按计划中的资料 ID 校验权限并把原件复制到执行输入目录
+        ↓
+DSH 在 Agent Workspace 处理已交付文件并执行任务，不直接访问 AnythingLLM
         ↓
 日志、成果、证据、结果和记忆
         ↓

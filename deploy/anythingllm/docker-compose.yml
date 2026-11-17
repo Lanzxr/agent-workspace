@@ -1,0 +1,59 @@
+services:
+  ocr-assets:
+    image: mintplexlabs/anythingllm:1.19.0
+    restart: "no"
+    environment:
+      TARGET_OCR_LANG: ${ANYTHINGLLM_OCR_LANG:-chi_sim,eng}
+      OCR_DATA_BASE_URL: ${ANYTHINGLLM_OCR_DATA_BASE_URL:-https://cdn.jsdelivr.net/npm/@tesseract.js-data}
+    volumes:
+      - anythingllm_storage:/app/server/storage
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - >-
+        set -eu;
+        mkdir -p /app/server/storage/models/tesseract;
+        for lang in $$(echo "$${TARGET_OCR_LANG}" | tr ',' ' '); do
+          case "$${lang}" in
+            chi_sim|eng) ;;
+            *) echo "Unsupported OCR language: $${lang}" >&2; exit 1;;
+          esac;
+          target="/app/server/storage/models/tesseract/$${lang}.traineddata";
+          if [ ! -s "$${target}" ]; then
+            echo "Downloading OCR language $${lang}";
+            curl --connect-timeout 10 --max-time 120 --retry 2 --retry-all-errors -fsSL "$${OCR_DATA_BASE_URL}/$${lang}/4.0.0_best_int/$${lang}.traineddata.gz" -o "$${target}.gz";
+            gzip -df "$${target}.gz";
+          fi;
+        done
+  anythingllm:
+    depends_on:
+      ocr-assets:
+        condition: service_completed_successfully
+    image: mintplexlabs/anythingllm:1.19.0
+    restart: unless-stopped
+    environment:
+      SERVER_PORT: "3001"
+      STORAGE_DIR: /app/server/storage
+      LLM_PROVIDER: generic-openai
+      GENERIC_OPEN_AI_BASE_PATH: ${ANYTHINGLLM_LLM_BASE_URL:-}
+      GENERIC_OPEN_AI_MODEL_PREF: ${ANYTHINGLLM_LLM_MODEL:-}
+      GENERIC_OPEN_AI_API_KEY: ${ANYTHINGLLM_LLM_API_KEY:-}
+      EMBEDDING_ENGINE: generic-openai
+      EMBEDDING_BASE_PATH: ${ANYTHINGLLM_EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL_PREF: ${ANYTHINGLLM_EMBEDDING_MODEL:-}
+      GENERIC_OPEN_AI_EMBEDDING_API_KEY: ${ANYTHINGLLM_EMBEDDING_API_KEY:-}
+      TARGET_OCR_LANG: ${ANYTHINGLLM_OCR_LANG:-chi_sim,eng}
+      HTTP_PROXY: ${ANYTHINGLLM_HTTP_PROXY:-}
+      HTTPS_PROXY: ${ANYTHINGLLM_HTTPS_PROXY:-}
+      NO_PROXY: ${ANYTHINGLLM_NO_PROXY:-localhost,127.0.0.1,::1}
+    ports:
+      - 127.0.0.1:3001:3001
+    volumes:
+      - anythingllm_storage:/app/server/storage
+
+volumes:
+  anythingllm_storage:
+
+networks:
+  default:
+    driver_opts:
+      com.docker.network.bridge.name: br-agent-kb

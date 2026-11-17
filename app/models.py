@@ -16,6 +16,7 @@ class Event:
     attachments: list[dict[str, Any]]
     capabilities: list[str]
     external_actor_id: str | None = None
+    knowledge_grant: str | None = None
 
     def __post_init__(self) -> None:
         required = {
@@ -35,7 +36,9 @@ class Event:
             raise ValueError("event capabilities must be non-empty strings")
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        value.pop("knowledge_grant", None)
+        return value
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "Event":
@@ -175,6 +178,8 @@ class PlanStep:
     status: str = "pending"
     capability: str | None = None
     completion_conditions: list[str] = field(default_factory=list)
+    knowledge_document_ids: list[str] = field(default_factory=list)
+    attachment_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -242,7 +247,7 @@ class ExecutionResult:
 @dataclass
 class PublicationDecision:
     decision_id: str
-    work_item_id: str
+    work_item_id: str | None
     conversation_id: str
     disposition: str
     reason: str

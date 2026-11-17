@@ -10,6 +10,8 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from .models import Event
 
+DEFAULT_DECISION_TIMEOUT_SECONDS = 600
+
 
 class DssuperAgentError(RuntimeError):
     category = "dssuperagent_error"
@@ -17,6 +19,10 @@ class DssuperAgentError(RuntimeError):
 
 class DssuperAgentUnavailable(DssuperAgentError):
     category = "upstream_unavailable"
+
+
+class DssuperAgentRejected(DssuperAgentError):
+    category = "upstream_rejected"
 
 
 class DssuperAgentTimeout(DssuperAgentError):
@@ -75,6 +81,8 @@ class DssuperAgentAdapter:
         self._validate_event(event, context or [])
         value = event.to_dict()
         value.pop("external_actor_id", None)
+        if event.knowledge_grant:
+            value["knowledge_grant"] = event.knowledge_grant
         value["context"] = context or []
         body = self._request("POST", "/orchestrator/api/company-agent/events", value)
         status = body.get("status")
@@ -127,6 +135,11 @@ class DssuperAgentAdapter:
                 unavailable = DssuperAgentUnavailable("DSSuperAgent resource is not available yet")
                 unavailable.status = error.code
                 raise unavailable from error
+            if 400 <= error.code < 500 and error.code not in {408, 429}:
+                detail = self._http_error_detail(error)
+                rejected = DssuperAgentRejected(f"DSSuperAgent rejected the request (HTTP {error.code}): {detail}")
+                rejected.status = error.code
+                raise rejected from error
             raise DssuperAgentUnavailable(f"DSSuperAgent returned HTTP {error.code}") from error
         except (TimeoutError, URLError, OSError) as error:
             raise DssuperAgentUnavailable(f"DSSuperAgent request failed: {type(error).__name__}") from error
@@ -139,6 +152,31 @@ class DssuperAgentAdapter:
         if not isinstance(body, dict):
             raise DssuperAgentProtocolError("DSSuperAgent response must be a JSON object")
         return body
+
+    @staticmethod
+    def _http_error_detail(error: HTTPError) -> str:
+        try:
+            body = json.loads(error.read(8192))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return "request rejected"
+        if not isinstance(body, dict):
+            return "request rejected"
+        details: list[str] = []
+        message = body.get("error")
+        if isinstance(message, str) and message.strip():
+            details.append(message.strip()[:240])
+        issues = body.get("issues")
+        if isinstance(issues, list):
+            for issue in issues[:8]:
+                if not isinstance(issue, dict):
+                    continue
+                path = issue.get("path")
+                reason = issue.get("message")
+                if not isinstance(path, list) or not isinstance(reason, str) or not reason.strip():
+                    continue
+                field = ".".join(str(part)[:40] for part in path[:6])[:120] or "request"
+                details.append(f"{field}: {reason.strip()[:160]}")
+        return "; ".join(details)[:600] or "request rejected"
 
     @classmethod
     def _parse_decision(cls, value: dict[str, Any], thread_key: str, trigger_id: str) -> DssuperAgentDecision:
@@ -196,7 +234,8 @@ class DssuperAgentAdapter:
                 raise DssuperAgentProtocolError("work proposals require completion conditions and plan steps")
             for step in intent["plan_steps"]:
                 if (not isinstance(step, dict)
-                        or set(step) - {"title", "objective", "capability", "completion_conditions"}
+                        or set(step) - {"title", "objective", "capability", "completion_conditions",
+                                        "knowledge_document_ids", "attachment_ids"}
                         or not isinstance(step.get("title"), str) or not step["title"].strip() or len(step["title"]) > 160
                         or not isinstance(step.get("objective"), str) or not step["objective"].strip() or len(step["objective"]) > 4000
                         or not isinstance(step.get("capability"), str) or not step["capability"].strip() or len(step["capability"]) > 100):
@@ -205,6 +244,18 @@ class DssuperAgentAdapter:
                 if (not isinstance(conditions, list) or len(conditions) > 20
                         or any(not isinstance(value, str) or not value.strip() or len(value) > 500 for value in conditions)):
                     raise DssuperAgentProtocolError("plan step completion conditions must be non-empty strings")
+                document_ids = step.get("knowledge_document_ids", [])
+                if (not isinstance(document_ids, list) or len(document_ids) > 20
+                        or any(not isinstance(value, str) or not value.strip() or len(value) > 200
+                               for value in document_ids)
+                        or len(set(document_ids)) != len(document_ids)):
+                    raise DssuperAgentProtocolError("plan step knowledge document IDs are invalid")
+                attachment_ids = step.get("attachment_ids", [])
+                if (not isinstance(attachment_ids, list) or len(attachment_ids) > 20
+                        or any(not isinstance(value, str) or not value.strip() or len(value) > 200
+                               for value in attachment_ids)
+                        or len(set(attachment_ids)) != len(attachment_ids)):
+                    raise DssuperAgentProtocolError("plan step attachment IDs are invalid")
 
     @staticmethod
     def _validate_event(event: Event, context: list[dict[str, Any]]) -> None:
@@ -221,6 +272,9 @@ class DssuperAgentAdapter:
             raise DssuperAgentProtocolError("event exceeds the DSSuperAgent bridge field limits")
         if len(event.attachments) > 20 or len(event.capabilities) > 40:
             raise DssuperAgentProtocolError("event exceeds the DSSuperAgent bridge collection limits")
+        if event.knowledge_grant is not None and (not isinstance(event.knowledge_grant, str)
+                                                   or not 32 <= len(event.knowledge_grant) <= 256):
+            raise DssuperAgentProtocolError("event has an invalid knowledge grant")
         if any(len(value) > 100 for value in event.capabilities):
             raise DssuperAgentProtocolError("event capability exceeds the DSSuperAgent bridge field limit")
         if len(context) > 10:

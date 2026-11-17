@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import json
+import socket
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from http.server import HTTPServer
 from threading import Thread
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from app.admin_api import make_handler
-from app.attachments import AttachmentIngestor, extract_text
+from app.attachments import AttachmentIngestor, _resolve_attachment_addresses, extract_text
+from app.knowledge.file_types import detect_file
 from app.control_plane import ControlPlane
 from app.identity import IdentityRegistry
 from app.models import Event
@@ -132,23 +135,60 @@ class ScheduledResumeTests(unittest.TestCase):
 
 
 class AttachmentTests(unittest.TestCase):
+    def test_qq_attachment_fake_dns_uses_validated_public_dns_addresses(self):
+        fake_address = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.165", 443))
+        with patch("app.attachments.socket.getaddrinfo", return_value=[fake_address]), \
+                patch("app.attachments._resolve_qq_attachment_addresses",
+                      return_value=("183.60.225.96",)) as resolve_qq:
+            addresses = _resolve_attachment_addresses("gzc-download.ftn.qq.com", 5)
+
+        self.assertEqual(addresses, ("183.60.225.96",))
+        resolve_qq.assert_called_once_with("gzc-download.ftn.qq.com", 5)
+
+    def test_non_qq_attachment_hosts_still_reject_private_dns_answers(self):
+        fake_address = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.18.0.165", 443))
+        with patch("app.attachments.socket.getaddrinfo", return_value=[fake_address]):
+            with self.assertRaisesRegex(ValueError, "private or reserved"):
+                _resolve_attachment_addresses("files.example", 5)
+
     def test_csv_and_text_extraction_are_bounded_and_structured(self):
         self.assertEqual(extract_text(b"name,count\nA,3\n", "stats.csv", "text/csv"), "name\tcount\nA\t3")
         self.assertEqual(extract_text(b"hello\nworld", "note.txt", "text/plain", max_chars=5), "hello")
 
-    def test_attachment_event_extraction_is_persisted_without_storing_binary(self):
+    def test_image_signatures_are_detected_and_local_parser_defers_to_ocr(self):
+        with tempfile.TemporaryDirectory() as directory:
+            png = Path(directory) / "image.bin"
+            png.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+            detected = detect_file(png, "中文图片.dat")
+            self.assertEqual(detected.filename, "中文图片.png")
+            self.assertEqual(detected.content_type, "image/png")
+            jpeg = Path(directory) / "photo.bin"
+            jpeg.write_bytes(b"\xff\xd8\xff\xe0JPEG payload")
+            detected_jpeg = detect_file(jpeg, "photo.jpeg")
+            self.assertEqual(detected_jpeg.filename, "photo.jpg")
+            self.assertEqual(detected_jpeg.content_type, "image/jpeg")
+        with self.assertRaisesRegex(ValueError, "AnythingLLM OCR"):
+            extract_text(b"\xff\xd8\xffimage", "photo.jpg", "image/jpeg")
+
+    def test_attachment_event_persists_placeholder_then_original_without_mutating_message(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(Path(directory) / "control.sqlite")
-            ingestor = AttachmentIngestor(store)
-            ingestor._download = lambda url: b"Report result: 42"  # type: ignore[method-assign]
+            ingestor = AttachmentIngestor(store, storage_directory=Path(directory) / "attachments")
+            self.assertTrue(callable(getattr(AttachmentIngestor, "_download_to", None)))
+            ingestor._download_to = lambda url, destination: (destination.write_bytes(b"Report result: 42") or 17)  # type: ignore[method-assign]
             from app.models import Event
             event = Event("event-1", "qq.group", "g", "g", "u", "2026-11-16T00:00:00Z", "Please read",
                           [{"filename": "report.txt", "content_type": "text/plain", "url": "https://files.example/a"}],
                           ["dsh.task"])
-            enriched = ingestor.enrich_event(event)
-            self.assertIn("Report result: 42", enriched.content)
+            registered = ingestor.register_event(event)
+            self.assertEqual(registered.content, "Please read")
+            self.assertEqual(registered.attachments[0]["status"], "received")
+            enriched = ingestor.process_event(registered)
+            self.assertEqual(enriched.content, "Please read")
             row = store.connection.execute("SELECT payload FROM attachments").fetchone()
-            self.assertEqual(json.loads(row[0])["status"], "ready")
+            payload = json.loads(row[0])
+            self.assertEqual(payload["status"], "stored")
+            self.assertTrue(Path(payload["original_path"]).is_file())
             store.close()
 
     def test_qq_message_uses_bound_internal_identity_and_passes_file_text_to_agent(self):
@@ -171,8 +211,10 @@ class AttachmentTests(unittest.TestCase):
                     raise AssertionError("no outbound message expected")
 
             service = QQChannelService(plane, Workflow(), Api(), QQBotSettings("app", "secret"),
-                                       identities=identities)
-            service.attachment_ingestor._download = lambda url: b"Attachment body"  # type: ignore[method-assign]
+                                       identities=identities,
+                                       attachment_ingestor=AttachmentIngestor(
+                                           plane.store, storage_directory=Path(directory) / "attachments"))
+            service.attachment_ingestor._download_to = lambda url, destination: (destination.write_bytes(b"Attachment body") or 15)  # type: ignore[method-assign]
             service.handle_gateway_event("GROUP_MESSAGE_CREATE", {
                 "id": "message-1", "group_openid": "group", "author": {"member_openid": "member"},
                 "content": "Please inspect", "timestamp": "2026-11-16T00:00:00Z",
@@ -181,7 +223,10 @@ class AttachmentTests(unittest.TestCase):
             saved = plane.get_event("qq:app:group:message-1")
             self.assertEqual(saved.actor_id, user.user_id)
             self.assertEqual(saved.external_actor_id, "member")
-            self.assertIn("Attachment body", saved.content)
+            self.assertEqual(saved.content, "Please inspect")
+            self.assertEqual(saved.attachments[0]["status"], "stored")
+            payload = plane.store.decode(plane.store.connection.execute("SELECT payload FROM attachments").fetchone()["payload"])
+            self.assertTrue(Path(payload["original_path"]).is_file())
             plane.close()
 
 
@@ -217,6 +262,19 @@ class AdminApiTests(unittest.TestCase):
                 self.assertTrue(json.loads(urlopen(setting_request).read())["enabled"])
                 status_request = Request(url, headers={"Authorization": "Bearer secret-token"})
                 self.assertTrue(json.loads(urlopen(status_request).read())["web_search_enabled"])
+                dssuperagent_request = Request(f"http://127.0.0.1:{server.server_port}/api/settings/dssuperagent-web-search",
+                    data=json.dumps({"enabled": True}).encode(), method="PUT",
+                    headers={"Authorization": "Bearer secret-token", "Content-Type": "application/json"})
+                self.assertTrue(json.loads(urlopen(dssuperagent_request).read())["enabled"])
+                dssuperagent_state = json.loads(urlopen(status_request).read())
+                self.assertTrue(dssuperagent_state["dssuperagent_web_search_enabled"])
+                dsh_request = Request(f"http://127.0.0.1:{server.server_port}/api/settings/dsh-web-search",
+                    data=json.dumps({"enabled": False}).encode(), method="PUT",
+                    headers={"Authorization": "Bearer secret-token", "Content-Type": "application/json"})
+                self.assertFalse(json.loads(urlopen(dsh_request).read())["enabled"])
+                final_state = json.loads(urlopen(status_request).read())
+                self.assertTrue(final_state["dssuperagent_web_search_enabled"])
+                self.assertFalse(final_state["dsh_web_search_enabled"])
             finally:
                 server.shutdown()
                 server.server_close()

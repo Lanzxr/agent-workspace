@@ -3,12 +3,14 @@
 !.env.example
 runtime.env
 company-agent-runtime/
+deploy/anythingllm/anythingllm.env
 data/
 runtime/
 artifacts/
 logs/
 __pycache__/
 *.py[cod]
+*.egg-info/
 .venv/
 node_modules/
 dist/

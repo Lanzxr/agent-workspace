@@ -45,7 +45,8 @@ class DshExecutionTests(unittest.TestCase):
         self.config_temporary_directory.cleanup()
         self.temporary_directory.cleanup()
 
-    def create_request(self, prompt: str = "success", *, timeout: float = 10) -> None:
+    def create_request(self, prompt: str = "success", *, timeout: float = 10,
+                       require_user_reply: bool = False) -> None:
         self.plane.create_work_item(work_item_id="work-1", title="Work", objective="Produce a file",
                                     source_event_ids=["event-1"], completion_conditions=["result.json exists"],
                                     risk_class="low", owner_ref=None)
@@ -57,7 +58,8 @@ class DshExecutionTests(unittest.TestCase):
         self.plane.create_execution_request(execution_id="execution-1", work_item_id="work-1",
                                            plan_step_id="step-1", workspace_id="agent-1", capability="dsh.task",
                                            parameters={"prompt": prompt, "expected_artifacts": ["result.json"],
-                                                       "timeout_seconds": timeout})
+                                                       "timeout_seconds": timeout,
+                                                       "require_user_reply": require_user_reply})
 
     def test_approved_execution_saves_tool_evidence_artifact_and_control_plane_result(self) -> None:
         self.create_request()
@@ -81,6 +83,25 @@ class DshExecutionTests(unittest.TestCase):
         self.assertIn('"tool_call"', trace)
         self.assertNotIn("test-secret-key", trace + result.output)
         self.assertNotIn("PRIVATE_REASONING", trace)
+
+    def test_required_user_reply_block_is_validated_and_process_notes_are_excluded(self) -> None:
+        self.create_request(require_user_reply=True)
+
+        result = self.dispatcher.dispatch("execution-1")
+
+        self.assertEqual(result.status, "succeeded", result.error)
+        artifact = (self.workspace.root / "artifacts/result.json").read_text(encoding="utf-8")
+        self.assertIn("<!-- COMPANY_AGENT_FINAL_REPLY_BEGIN:execution-1 -->", artifact)
+        self.assertIn("Fixture final answer.", artifact)
+
+    def test_missing_required_user_reply_block_fails_the_execution(self) -> None:
+        self.create_request("missing-reply-contract", require_user_reply=True)
+
+        result = self.dispatcher.dispatch("execution-1")
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.metadata["error_category"], "reply_contract")
+        self.assertEqual(self.plane.get_work_item("work-1").status, "failed")
 
     def test_duplicate_dispatch_returns_the_saved_result_without_repeating_tools(self) -> None:
         self.create_request()

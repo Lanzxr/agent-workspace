@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from .execution_state import private_directory, write_private_json
 from .models import ExecutionRequest, ExecutionResult
+from .reply_contract import extract_final_reply, final_reply_markers
 from .process_runner import run_process
 from .runtime_config import DSH_VERSION, POLICY_VERSION, RuntimeConfig
 from .workspace import Workspace, WorkspaceManager
@@ -27,13 +28,18 @@ class DshTask:
     timeout_seconds: float = 240
     max_output_bytes: int = 2_000_000
     max_artifact_bytes: int = 16_000_000
+    knowledge_document_ids: tuple[str, ...] = ()
+    attachment_ids: tuple[str, ...] = ()
+    require_user_reply: bool = False
 
     @classmethod
     def from_request(cls, request: ExecutionRequest) -> "DshTask":
         if request.capability != "dsh.task":
             raise ValueError("DSH Adapter only accepts dsh.task")
         parameters = request.parameters
-        if set(parameters) - {"prompt", "expected_artifacts", "timeout_seconds"}:
+        if set(parameters) - {"prompt", "expected_artifacts", "timeout_seconds", "knowledge_document_ids",
+                              "attachment_ids",
+                              "require_user_reply"}:
             raise ValueError("unsupported dsh.task parameters")
         prompt = parameters.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode("utf-8")) > 64000:
@@ -51,7 +57,24 @@ class DshTask:
         if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
                 or not math.isfinite(timeout) or not 0 < timeout <= 300):
             raise ValueError("timeout_seconds must be in (0, 300]")
-        return cls(prompt, tuple(artifacts), float(timeout))
+        document_ids = parameters.get("knowledge_document_ids", [])
+        if (not isinstance(document_ids, list) or len(document_ids) > 20
+                or any(not isinstance(value, str) or not value or len(value) > 200 for value in document_ids)
+                or len(set(document_ids)) != len(document_ids)):
+            raise ValueError("knowledge_document_ids must contain at most twenty unique IDs")
+        attachment_ids = parameters.get("attachment_ids", [])
+        if (not isinstance(attachment_ids, list) or len(attachment_ids) > 20
+                or any(not isinstance(value, str) or not value or len(value) > 200 for value in attachment_ids)
+                or len(set(attachment_ids)) != len(attachment_ids)):
+            raise ValueError("attachment_ids must contain at most twenty unique IDs")
+        if (document_ids or attachment_ids) and len(prompt.encode("utf-8")) > 63_000:
+            raise ValueError("prompt leaves too little space for attached-file references")
+        require_user_reply = parameters.get("require_user_reply", False)
+        if not isinstance(require_user_reply, bool):
+            raise ValueError("require_user_reply must be a boolean")
+        return cls(prompt, tuple(artifacts), float(timeout), knowledge_document_ids=tuple(document_ids),
+                   attachment_ids=tuple(attachment_ids),
+                   require_user_reply=require_user_reply)
 
 
 class DshAdapter:
@@ -142,17 +165,24 @@ class DshAdapter:
                                    metadata={"error_category": "runtime_version", "started_at": started_at,
                                              "finished_at": datetime.now(timezone.utc).isoformat()})
         self.manager.record_dependency(workspace.workspace_id, "dsh", DSH_VERSION, "official-headless")
+        execution_contract = (
+            "Execute the task using tools in the current workspace. Inputs are in work/, reusable scripts in tools/. "
+            "Write each expected artifact under artifacts/, using exactly the relative names listed. "
+            "Keep host files, runtime configuration, logs/ and state/ unchanged. "
+            "Do not publish messages, access production systems or widen permissions. "
+            "Report what actually ran and any failures."
+        )
+        if task.require_user_reply:
+            begin, end = final_reply_markers(request.execution_id)
+            execution_contract += (
+                " The final expected artifact must contain exactly one final answer block bounded by these exact "
+                f"markers: {begin} and {end}. Only the text inside that block is eligible for delivery to the user."
+            )
         payload = {
             "execution_id": request.execution_id, "workspace_id": workspace.workspace_id,
             "plan_step_id": request.plan_step_id, "prompt": task.prompt,
             "expected_artifacts": list(task.expected_artifacts),
-            "execution_contract": (
-                "Execute the task using tools in the current workspace. Inputs are in work/, reusable scripts in tools/. "
-                "Write each expected artifact under artifacts/, using exactly the relative names listed. "
-                "Keep host files, runtime configuration, logs/ and state/ unchanged. "
-                "Do not publish messages, access production systems or widen permissions. "
-                "Report what actually ran and any failures."
-            ),
+            "execution_contract": execution_contract,
         }
         process = run_process(
             (*command, "--profile", "headless", "--patch", str(patch_path), "--json",
@@ -171,6 +201,21 @@ class DshAdapter:
             except (OSError, ValueError) as error:
                 category = "artifact_validation"
                 output = output + "\n" + str(error)
+        if category is None and task.require_user_reply:
+            try:
+                reply_found = any(
+                    extract_final_reply(
+                        self._artifact_path(workspace, entry["path"].removeprefix("artifacts/")).read_text(
+                            encoding="utf-8"), request.execution_id,
+                    ) is not None
+                    for entry in manifest
+                    if isinstance(entry.get("path"), str) and entry["path"].startswith("artifacts/")
+                )
+            except (OSError, UnicodeError, ValueError):
+                reply_found = False
+            if not reply_found:
+                category = "reply_contract"
+                output += "\nDSH final artifact is missing a valid user-reply block"
         trace_name = f"dsh/{request.execution_id}.events.jsonl"
         self.manager.append_log(workspace.workspace_id, trace_name,
                                 self.config.redact("".join(json.dumps(event, ensure_ascii=False) + "\n" for event in events)))

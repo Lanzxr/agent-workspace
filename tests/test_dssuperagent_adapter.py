@@ -5,7 +5,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from app.dssuperagent import DssuperAgentAdapter, DssuperAgentProtocolError
+from app.dssuperagent import DssuperAgentAdapter, DssuperAgentProtocolError, DssuperAgentRejected
 from app.models import Event
 
 
@@ -13,6 +13,10 @@ class DssuperAgentAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.requests: list[tuple[str, dict[str, str], dict[str, object] | None]] = []
         self.thread_detail: dict[str, object] = {"decisions": []}
+        self.post_response_status = 202
+        self.post_response_body: dict[str, object] = {
+            "status": "stored", "trigger_id": "company-agent:event-1", "thread": "company-agent:conversation-1"
+        }
         requests = self.requests
         owner = self
 
@@ -31,8 +35,7 @@ class DssuperAgentAdapterTests(unittest.TestCase):
             def do_POST(self) -> None:
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 requests.append((self.path, {key.lower(): value for key, value in self.headers.items()}, body))
-                self._write(202, {"status": "stored", "trigger_id": "company-agent:event-1",
-                                  "thread": "company-agent:conversation-1"})
+                self._write(owner.post_response_status, owner.post_response_body)
 
             def do_GET(self) -> None:
                 requests.append((self.path, {key.lower(): value for key, value in self.headers.items()}, None))
@@ -65,6 +68,21 @@ class DssuperAgentAdapterTests(unittest.TestCase):
         self.assertNotIn("external_actor_id", body)
         self.assertEqual(receipt.trigger_id, "company-agent:event-1")
         self.assertEqual(receipt.thread_key, "company-agent:conversation-1")
+
+    def test_http_validation_rejection_keeps_safe_error_details_without_echoing_values(self) -> None:
+        self.post_response_status = 400
+        self.post_response_body = {
+            "error": "Invalid settings",
+            "issues": [{"path": ["attachments", 0, "url"], "message": "expected string", "input": "secret-url"}],
+        }
+
+        with self.assertRaises(DssuperAgentRejected) as error:
+            self.adapter.submit_event(self.event())
+
+        self.assertEqual(getattr(error.exception, "status", None), 400)
+        self.assertIn("attachments.0.url", str(error.exception))
+        self.assertIn("expected string", str(error.exception))
+        self.assertNotIn("secret-url", str(error.exception))
 
     def test_wait_returns_only_the_decision_for_the_submitted_trigger(self) -> None:
         self.thread_detail = {"decisions": [

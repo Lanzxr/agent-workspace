@@ -10,12 +10,12 @@
 | 附件读取 | 安全下载并提取文本；二进制不落盘，提取状态和文本摘要写入附件记录。 | `app/attachments.py` |
 | 用户身份 | 管理内部用户及 QQ/其他平台外部 ID 绑定；群级绑定优先，全局 `*` 绑定作为回退。 | `app/identity.py` |
 | 定时任务 | 将用户本地时间换算为 UTC，持久化来源事件、工作项、续接提示、上下文和回复目标；重启后恢复未完成唤醒。 | `app/scheduler.py`、`app/scheduled_resume.py` |
-| 联网检索开关 | 设置存入 Company Agent 控制库；DSH 每次创建执行配置时读取开关，操作 DSH 官方 `tool-web` 插件配置，不改 DSH 源码。 | `app/runtime_config.py`、`app/dsh.py` |
+| 联网检索开关 | 控制库分别保存 DSSuperAgent 和 DSH 的联网权限。DSSuperAgent 每次搜索/读网页前经过受控网关检查；DSH 仍在创建执行配置时读取自己的开关，操作官方 `tool-web` 插件，不改 DSH 核心。 | `app/web_gate.py`、`app/admin_api.py`、`app/runtime_config.py`、`app/dsh.py` |
 | 中控台 | 提供本地认证网页/API，管理用户绑定、日程和联网设置，并查看状态、空间用量、审计记录及指定执行的 stdout/stderr。 | `app/admin_api.py`、`web/index.html` |
 
 ## 附件规则
 
-支持 TXT、Markdown、CSV、JSON、HTML、DOCX、XLSX 和 PDF。下载仅允许标准 HTTPS、拒绝重定向、限制 12 MiB 下载体积；提取内容最多 40,000 字符。Office 压缩包另有限制。PDF 需要安装可选依赖 `pip install .[attachments]`；未安装或格式不可读时，记录失败原因，消息仍会进入判断链路，但不会包含文件正文。图片、音频和扫描件 OCR 当前不支持。
+支持 TXT、Markdown、CSV、JSON、HTML、DOCX、XLSX 和 PDF。下载仅允许标准 HTTPS、拒绝重定向、限制 12 MiB 下载体积；提取内容最多 40,000 字符。Office 压缩包另有限制。PDF 需要安装可选依赖 `pip install .[attachments]`；未安装或格式不可读时，记录失败原因，消息仍会进入判断链路，但不会包含文件正文。PNG/JPG/JPEG 和扫描版 PDF 交给 AnythingLLM OCR；OCR 未完成时保留原件和占位状态，失败记录为 `failed`，不会误报为已完成。
 
 ## 用户绑定
 
@@ -40,7 +40,14 @@ py -m app --data-dir "$HOME/.local/share/company-agent" admin-serve --config "$H
 
 ## 联网检索
 
-默认关闭。中控台开关写入 `control.sqlite`，DSSuperAgent 判断阶段不因此获得联网能力；开关只控制经过 Company Agent 授权的 DSH 执行配置。改变开关后新建的 DSH 执行会生效，已运行中的 DSH 进程不热更新。开启后由 DSH 内置 `tool-web` 提供搜索/网页读取；实际可用性仍依赖安装的 DSH 版本及其网络环境。
+默认关闭，分成两个开关：
+
+- `DSSuperAgent 联网检索`：控制 `orchestrator_web_search` 和 `orchestrator_web_fetch`。每次调用先请求 Company Agent 的 `/internal/web/authorize`，开关关闭时返回 403，开关打开后才调用 DSH 官方 `ctx.web` 能力。切换后不需要重启 DSSuperAgent，下一次调用立即使用新状态。
+- `DSH 任务联网`：控制 Company Agent 启动的 DSH 执行进程是否加载官方 `tool-web`。它只影响新建的 DSH 执行，已经运行的进程不热更新。
+
+这样可以只允许 DSSuperAgent 查资料，也可以只允许获准的 DSH 任务联网。两层权限互不替代，资料库检索也不受这两个开关影响。
+
+受控网关默认监听 `127.0.0.1:8767`，配置项是 `COMPANY_AGENT_WEB_GATE_HOST`、`COMPANY_AGENT_WEB_GATE_PORT`、`COMPANY_AGENT_WEB_GATE_API_KEY`。DSSuperAgent 进程需要继承 `COMPANY_AGENT_WEB_GATE_URL`（默认 `http://127.0.0.1:8767/internal/web/authorize`）和同一个 API Key（非 loopback 部署必须设置至少 32 个字符）。搜索结果由 DSH 官方 Web seam 返回，包含来源 URL；Company Agent 只负责权限、审计和即时开关，不改 DSH 本体。
 
 ## 验收范围
 

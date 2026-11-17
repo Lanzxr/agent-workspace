@@ -25,6 +25,8 @@
 
 Headless 传输是 NDJSON：必须读取 `session`、检查所有 `tool_call`/`tool_result`、并收到 reason 为 `completed` 的 `final`。成功返回还要求每个声明的产物存在、是工作区内的普通文件、大小受限且不包含运行密钥。Reasoning/`thinking` 不保留为证据。
 
+当 QQ 任务需要把结论交给用户时，最后一个执行请求会带有 `require_user_reply=true`。DSH 仍只在 Workspace 内工作，不发送 QQ 消息；它必须在声明的最终产物中写入唯一一对绑定当前 `execution_id` 的 `COMPANY_AGENT_FINAL_REPLY_BEGIN/END` 标记，标记内只能是用户可读结论且不超过 1,500 个汉字和标点。Company Agent 在发布前重新校验该标记和长度，只发送标记内文本；缺失、重复或超长会使执行失败，不能把执行日志或“已写入报告”当成用户答复。
+
 在 Ubuntu WSL2 开发运行时，DSH 的一次性 Bash 使用 Bubblewrap runner 叠加 `workspace-write`：隐藏 `/mnt`、`/run`、整个 WSL 用户目录和整个 Company Agent `--data-dir`，再将当前 Workspace 重新挂到原路径；自定义 `--config` 文件若位于其它可见目录，会被覆盖为 `/dev/null`，若位于当前 Workspace 则拒绝启动。Bash 使用独立网络命名空间，DSH 主进程仍可访问模型 Provider。DSH 文件工具、持久 Bash、PowerShell、终端和工作目录切换工具关闭，避免绕过该 Shell 边界。缺少可执行 Bubblewrap，或 Workspace 位于受保护目录，执行在启动前失败。
 
 ## 执行结果

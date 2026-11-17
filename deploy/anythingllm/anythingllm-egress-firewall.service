@@ -1,0 +1,13 @@
+[Unit]
+Description=Allow AnythingLLM Docker network outbound traffic
+Requires=docker.service
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/company-agent-anythingllm-egress
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

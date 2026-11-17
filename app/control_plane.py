@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,12 @@ class ControlPlane:
                                (key, self.store.encode({"value": value}), now))
             self._audit(connection, "setting", key, "updated", {"value": value}, now)
 
+    def record_external_audit(self, action: str, payload: dict[str, Any]) -> None:
+        """Record a bounded audit event emitted by an authenticated capability bridge."""
+        now = self.now()
+        with self.store.transaction() as connection:
+            self._audit(connection, "capability", "web", action, payload, now)
+
     def set_runtime_status(self, key: str, value: Any) -> None:
         now = self.now()
         with self.store.transaction() as connection:
@@ -113,6 +120,22 @@ class ControlPlane:
         if row is None:
             raise NotFound(f"event not found: {event_id}")
         return Event.from_dict(self.store.decode(row[0]))
+
+    def update_event(self, event: Event) -> Event:
+        current = self.get_event(event.event_id)
+        immutable = ("source_type", "source_id", "conversation_id", "actor_id", "occurred_at", "content",
+                     "capabilities", "external_actor_id")
+        if any(getattr(current, name) != getattr(event, name) for name in immutable):
+            raise ControlPlaneError("event updates may only change attachment processing metadata")
+        if current.attachments == event.attachments:
+            return current
+        now = self.now()
+        with self.store.transaction() as connection:
+            connection.execute("UPDATE events SET payload=? WHERE event_id=?",
+                               (self.store.encode(event.to_dict()), event.event_id))
+            self._audit(connection, "event", event.event_id, "attachments_updated",
+                        {"attachment_count": len(event.attachments)}, now)
+        return event
 
     def create_conversation(
         self,
@@ -602,7 +625,7 @@ class ControlPlane:
         self,
         *,
         decision_id: str,
-        work_item_id: str,
+        work_item_id: str | None,
         conversation_id: str,
         disposition: str,
         reason: str,
@@ -611,7 +634,8 @@ class ControlPlane:
         idempotency_key: str,
         destination: dict[str, str] | None = None,
     ) -> PublicationDecision:
-        self.get_work_item(work_item_id)
+        if work_item_id is not None:
+            self.get_work_item(work_item_id)
         self.get_conversation(conversation_id)
         if not idempotency_key.strip():
             raise ValueError("idempotency_key is required")
@@ -654,14 +678,45 @@ class ControlPlane:
                     return PublicationDecision.from_dict(self.store.decode(existing[0]))
                 raise
             if outbox_id:
+                outbox_destination = dict(destination or {})
+                if (outbox_destination.get("channel") == "qq"
+                        and outbox_destination.get("reply_to_message_id")):
+                    self._assign_qq_reply_sequence(connection, conversation_id, outbox_destination)
                 message = OutboxMessage(outbox_id, conversation_id, body, idempotency_key, "pending", now,
-                                        destination or {}, publication_disposition=disposition)
+                                        outbox_destination, publication_disposition=disposition)
                 connection.execute(
                     "INSERT INTO outbox(outbox_id, idempotency_key, payload, status, created_at) VALUES (?, ?, ?, ?, ?)",
                     (outbox_id, idempotency_key, self.store.encode(message.to_dict()), message.status, now),
                 )
             self._audit(connection, "publication_decision", decision_id, "decided", {"disposition": disposition}, now)
         return decision
+
+    @staticmethod
+    def _assign_qq_reply_sequence(connection: Any, conversation_id: str,
+                                  destination: dict[str, str]) -> None:
+        deadline = destination.get("reply_deadline_epoch")
+        if deadline is not None:
+            try:
+                if time.time() >= float(deadline):
+                    return
+            except ValueError as error:
+                raise ValueError("QQ reply deadline is invalid") from error
+        row = connection.execute(
+            "SELECT last_sequence FROM qq_reply_sequences WHERE conversation_id = ? AND reply_message_id = ?",
+            (conversation_id, destination["reply_to_message_id"]),
+        ).fetchone()
+        sequence = int(row[0]) + 1 if row else 1
+        if row:
+            connection.execute(
+                "UPDATE qq_reply_sequences SET last_sequence = ? WHERE conversation_id = ? AND reply_message_id = ?",
+                (sequence, conversation_id, destination["reply_to_message_id"]),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO qq_reply_sequences(conversation_id, reply_message_id, last_sequence) VALUES (?, ?, ?)",
+                (conversation_id, destination["reply_to_message_id"], sequence),
+            )
+        destination["msg_seq"] = str(sequence)
 
     def list_outbox(self) -> list[OutboxMessage]:
         rows = self.store.connection.execute("SELECT payload FROM outbox ORDER BY rowid").fetchall()

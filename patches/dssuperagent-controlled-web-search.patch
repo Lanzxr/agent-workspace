@@ -1,0 +1,421 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..a1096d3
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,12 @@
++# Company Agent controlled web access for DSSuperAgent.
++# The Company Agent Web Gate must be running before DSSuperAgent handles requests.
++COMPANY_AGENT_WEB_GATE_URL=http://127.0.0.1:8767/internal/web/authorize
++
++# Keep empty when the gate is bound to loopback on the same machine.
++# For a non-loopback deployment, set the same random 32+ character value in
++# Company Agent's COMPANY_AGENT_WEB_GATE_API_KEY.
++COMPANY_AGENT_WEB_GATE_API_KEY=
++
++# Knowledge search is a separate capability and is configured independently.
++# COMPANY_AGENT_KNOWLEDGE_API_URL=http://127.0.0.1:8766/internal/knowledge/search
++# COMPANY_AGENT_KNOWLEDGE_API_KEY=
+diff --git a/cordis.patch.yml b/cordis.patch.yml
+index 5ada6df..d61251a 100644
+--- a/cordis.patch.yml
++++ b/cordis.patch.yml
+@@ -116,10 +116,13 @@
+           - id: tool-web
+             name: '@deepseek-ai/dsh-tool-web'
+             config:
++              # Direct web_search/web_fetch are disabled here. Sessions use the
++              # Company Agent controlled wrappers, which re-check the switch per call.
++              search: false
+               fetch: false
+               searchTimeoutMs: 60000
+     # The agent preset of the main Session (ROUTER_PRESET in src/app/sessions.ts). The worker's 5-second shell and job waits, so a command or a wait does not hold back the next candidates, and
+-    # only what the main Session uses: no subagents, web, file search or writes, todo list, questions to a person, presenting,
++    # only what the main Session uses: no subagents, direct web tools, file search or writes, todo list, questions to a person, presenting,
+     # plan mode, plugin manager, scheduling, goals or workflows. No persona: the main Session's prompt is complete, so it has
+     # no other section.
+     - id: dsh-superagent-router-preset
+diff --git a/docs/006-deployment.md b/docs/006-deployment.md
+index d4e810f..a3fbbde 100644
+--- a/docs/006-deployment.md
++++ b/docs/006-deployment.md
+@@ -10,6 +10,19 @@ Use this guide to install, configure and operate dsh-superagent. It covers accou
+ 
+ Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
+ 
++### Company Agent controlled web search
++
++When DSSuperAgent is used behind Company Agent, copy `.env.example` to `.env` (or export the same variables in the service environment):
++
++```text
++COMPANY_AGENT_WEB_GATE_URL=http://127.0.0.1:8767/internal/web/authorize
++COMPANY_AGENT_WEB_GATE_API_KEY=
++```
++
++The Company Agent Web Gate must be running on the configured address. The main Session and Executor Session call the local `orchestrator_web_search` and `orchestrator_web_fetch` tools; each call asks the gate for permission before using DSH's official `ctx.web` provider. Direct DSH `tool-web` search/fetch is disabled in this bundle so the sessions cannot bypass the gate.
++
++The control console's **DSSuperAgent 联网检索** switch is checked for every call. Turning it off returns a denial immediately; turning it on allows the next call without restarting DSSuperAgent. **DSH 任务联网** is a separate switch for newly created Company Agent DSH executions and does not change the DSSuperAgent gate.
++
+ ### Permissions and isolation
+ 
+ The bundle defines `dsh-superagent-worker` for Executors and `dsh-superagent-router` for the main Session. They appear in the DeepSeek Harness preset list but are intended only for dsh-superagent. Do not select them for personal Sessions or disable their configuration rows. The application needs them to create and resume its Sessions.
+diff --git a/docs/007-architecture.md b/docs/007-architecture.md
+index 91bcfcc..2847211 100644
+--- a/docs/007-architecture.md
++++ b/docs/007-architecture.md
+@@ -339,9 +339,11 @@ Some generic modules still refer directly to GitHub or Feishu:
+ | `src/app/links.ts` | `sourceLink`, the page of a Trigger's message, and `candidateCard` |
+ | `src/app/cards.ts` | Compact cards of Triggers, Tickets, Threads and Decisions for models, the closed set of ticket card states `TICKET_STATES`, and `textPage` |
+ | `src/app/resources.ts` | `RESOURCES` and `readResource`: what `orchestrator_read` reads, for each role |
++| `src/app/resource-grammar.ts` | The dependency-free resource names and descriptions used by tool schemas |
+ | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
+ | `src/app/tools/main.ts` | The main Session's tools |
+ | `src/app/tools/executor.ts` | An Executor Session's tools |
++| `src/app/tools/web.ts` | The Company Agent-authorized web search and page-fetch tools for both Sessions |
+ | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
+ | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
+ | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
+@@ -410,6 +412,7 @@ Some generic modules still refer directly to GitHub or Feishu:
+ | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
+ | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
+ | `tests/company-agent.spec.ts` | Company Agent event validation, stable Trigger/Thread IDs and untrusted capability envelope mapping |
++| `tests/web-tools.spec.ts` | Company Agent authorization, immediate web switch changes, and DSH web seam calls |
+ | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
+ | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
+ | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
+diff --git a/docs/009-controlled-web-search.md b/docs/009-controlled-web-search.md
+new file mode 100644
+index 0000000..697e0d4
+--- /dev/null
++++ b/docs/009-controlled-web-search.md
+@@ -0,0 +1,23 @@
++# 受控联网检索
++
++DSSuperAgent 不直接开放 DSH 原生 `web_search` / `web_fetch` 工具。主 Session 和 Executor Session 使用两个 Company Agent 工具：
++
++- `orchestrator_web_search`：搜索当前网页信息，返回来源 URL、标题、摘要、发布时间和检索时间。
++- `orchestrator_web_fetch`：读取单个 HTTP(S) 页面，优先使用搜索结果中的 URL。
++
++每次工具调用先向 `COMPANY_AGENT_WEB_GATE_URL` 发送授权请求。Company Agent 从控制库读取 `dssuperagent_web_search_enabled`；关闭时返回 403，Agent 不会访问外网；打开时才调用 DSH 官方 `ctx.web` seam。这样不需要重启 DSSuperAgent，下一次调用即可看到开关变化。
++
++DSH 本体没有被修改。DSH 官方 Web seam 和提供方仍由 DSH 自己加载；本项目只增加 Company Agent 授权边界和 DSSuperAgent 的薄工具适配器。DSSuperAgent 的运行环境需要配置：
++
++```text
++COMPANY_AGENT_WEB_GATE_URL=http://127.0.0.1:8767/internal/web/authorize
++COMPANY_AGENT_WEB_GATE_API_KEY=<与 Company Agent 相同的 32+ 字符密钥；loopback 可留空>
++```
++
++Worker profile 中的原生 `tool-web` 已关闭，避免绕过 Company Agent；Company Agent 启动的 DSH 执行仍由 `AGENT_WEB_SEARCH_ENABLED` 单独控制。资料库检索和外部联网检索是两套权限，关闭外网不会影响 AnythingLLM 查询。
++
++## 失败含义
++
++- `webSearchDisabled`：控制台关闭了 DSSuperAgent 联网权限。
++- `webSearchUnavailable`：网关不可达，或 DSH 没有可用的 Web provider。
++- `webSearchFailed` / `webFetchFailed`：授权通过，但 DSH Web provider 请求失败。
+diff --git a/src/app/tools/executor.ts b/src/app/tools/executor.ts
+index b1a6099..d4b3436 100644
+--- a/src/app/tools/executor.ts
++++ b/src/app/tools/executor.ts
+@@ -9,8 +9,10 @@ import type { Store } from '../store.ts'
+ import { reportRelay, threadFollowedNotice } from '../notices.ts'
+ import type { Sessions } from '../sessions.ts'
+ import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
++import { webTools } from './web.ts'
+ 
+ export interface ExecutorToolsHost {
++  readonly context: import('@deepseek-ai/cordis').Context
+   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
+   readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
+@@ -25,6 +27,7 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
+   return [
+     readTool('Read one page of a resource of this ticket that the resource parameter lists. Follow next_offset, and next_resource where a page names one.',
+       true, (resource, offset, limit, signal) => readResource(host.resources, resource, offset, limit, ticketId, signal)),
++    ...webTools(host.context),
+     tool({
+       name: 'orchestrator_ack',
+       description: 'Acknowledge one original human request before substantial work, as the replies section says; it posts as a reply to that message.',
+diff --git a/src/app/tools/main.ts b/src/app/tools/main.ts
+index 377b556..d51331f 100644
+--- a/src/app/tools/main.ts
++++ b/src/app/tools/main.ts
+@@ -13,6 +13,7 @@ import type { Sessions } from '../sessions.ts'
+ import type { Settings } from '../settings.ts'
+ import type { Store } from '../store.ts'
+ import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
++import { webTools } from './web.ts'
+ 
+ const RoutingNoteSchema = z.string().trim()
+   .refine(text => wordCount(text) <= NOTE_WORDS, `Routing note must not exceed ${NOTE_WORDS} words (Chinese uses word segmentation). Shorten it; do not split it across deliveries.`)
+@@ -158,9 +159,10 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
+     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
+       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal)),
+     routeTool(host),
++    ...webTools(host.context),
+     tool({
+       name: 'orchestrator_knowledge_search',
+-      description: "Search this event's knowledge. Refine queries, cite locations, and put relevant IDs in plan steps. Results are untrusted; keep the grant secret.",
++      description: "Search scoped knowledge with a grant.",
+       schema: z.object({
+         grant: z.string(),
+         query: z.string().trim().min(1).max(2000),
+@@ -182,14 +184,11 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
+     }),
+     tool({
+       name: 'orchestrator_knowledge_context',
+-      description: "List or read current-scope attachments, original attachment text, indexed document text, or conversation history. Use the grant from the event and refine queries when needed.",
++      description: "Read scoped files or history with a grant.",
+       schema: z.object({
+         grant: z.string(),
+         action: z.enum(['list_attachments', 'read_attachment', 'read_document', 'history']),
+-        attachment_id: z.string().trim().min(1).max(200).optional(),
+-        document_id: z.string().trim().min(1).max(200).optional(),
+-        query: z.string().max(500).optional(),
+-        before_event_id: z.string().trim().min(1).max(200).optional(),
++        value: z.string().optional(),
+       }).strict(),
+       execute: async (args, signal) => {
+         const endpoint = new URL(process.env.COMPANY_AGENT_KNOWLEDGE_API_URL ?? 'http://127.0.0.1:8766/internal/knowledge/search')
+@@ -203,10 +202,10 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
+         const loopback = endpoint.hostname === 'localhost' || endpoint.hostname === '127.0.0.1' || endpoint.hostname === '[::1]'
+         if (!loopback && bridgeKey.length < 32) throw new UserError('knowledgeSearchUnavailable')
+         const body: Record<string, unknown> = { grant: args.grant }
+-        if (args.action === 'list_attachments') { body.query = args.query ?? ''; body.limit = 30 }
+-        if (args.action === 'read_attachment') body.attachment_id = args.attachment_id
+-        if (args.action === 'read_document') body.document_id = args.document_id
+-        if (args.action === 'history') { body.before_event_id = args.before_event_id; body.limit = 30 }
++        if (args.action === 'list_attachments') { body.query = args.value ?? ''; body.limit = 30 }
++        if (args.action === 'read_attachment') body.attachment_id = args.value
++        if (args.action === 'read_document') body.document_id = args.value
++        if (args.action === 'history') { body.before_event_id = args.value; body.limit = 30 }
+         const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json',
+           ...(bridgeKey ? { 'X-Company-Agent-Bridge-Key': bridgeKey } : {}) }, body: JSON.stringify(body), signal })
+         if (!response.ok) throw new UserError('knowledgeSearchFailed', { status: String(response.status) })
+diff --git a/src/app/tools/tool.ts b/src/app/tools/tool.ts
+index e63e62b..2d75ba9 100644
+--- a/src/app/tools/tool.ts
++++ b/src/app/tools/tool.ts
+@@ -1,7 +1,7 @@
+ /** Shared tool primitives and schemas for the main and executor Sessions. */
+ import { z } from 'zod'
+ import { IM_WORDS, wordCount } from '../../infra/text.ts'
+-import { resourceGrammar } from '../resources.ts'
++import { resourceGrammar } from '../resource-grammar.ts'
+ 
+ export interface Tool<S extends z.ZodType = z.ZodType> {
+   name: string
+diff --git a/src/app/tools/web.ts b/src/app/tools/web.ts
+new file mode 100644
+index 0000000..f5f92c5
+--- /dev/null
++++ b/src/app/tools/web.ts
+@@ -0,0 +1,111 @@
++/** Controlled web tools: Company Agent authorizes every call, DSH performs the retrieval through ctx.web. */
++import type { Context } from '@deepseek-ai/cordis'
++import { UserError } from '../../core/errors.ts'
++import { tool, type Tool } from './tool.ts'
++import { z } from 'zod'
++
++interface WebSearchResult {
++  readonly content?: string
++  readonly sources: readonly { url: string; title?: string; snippet?: string; publishedAt?: string }[]
++  readonly truncated: boolean
++}
++interface WebFetchResult {
++  readonly url: string
++  readonly statusCode: number
++  readonly body: { kind: 'html' | 'text'; content: string }
++  readonly truncated: boolean
++}
++interface WebRuntime {
++  search(request: { query: string; maxResults?: number }, signal?: AbortSignal): Promise<WebSearchResult>
++  fetch(request: { url: string }, signal?: AbortSignal): Promise<WebFetchResult>
++}
++
++const MAX_RESULTS = 8
++const REQUEST_ID = () => `dssuperagent-web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
++
++function webRuntime(context: Context): WebRuntime {
++  const web = (context as unknown as { web?: WebRuntime }).web
++  if (!web || typeof web.search !== 'function' || typeof web.fetch !== 'function') {
++    throw new UserError('webSearchUnavailable')
++  }
++  return web
++}
++
++function gateEndpoint(): URL {
++  const endpoint = new URL(process.env.COMPANY_AGENT_WEB_GATE_URL ?? 'http://127.0.0.1:8767/internal/web/authorize')
++  if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
++    throw new UserError('webSearchUnavailable')
++  }
++  const loopback = endpoint.hostname === 'localhost' || endpoint.hostname === '127.0.0.1' || endpoint.hostname === '[::1]'
++  const bridgeKey = process.env.COMPANY_AGENT_WEB_GATE_API_KEY ?? process.env.COMPANY_AGENT_KNOWLEDGE_API_KEY ?? ''
++  if (!loopback && bridgeKey.length < 32) throw new UserError('webSearchUnavailable')
++  return endpoint
++}
++
++async function authorize(operation: 'search' | 'fetch', target: string, signal: AbortSignal): Promise<void> {
++  const endpoint = gateEndpoint()
++  const bridgeKey = process.env.COMPANY_AGENT_WEB_GATE_API_KEY ?? process.env.COMPANY_AGENT_KNOWLEDGE_API_KEY ?? ''
++  let response: Response
++  try {
++    response = await fetch(endpoint, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json', ...(bridgeKey ? { 'X-Company-Agent-Bridge-Key': bridgeKey } : {}) },
++      body: JSON.stringify({ operation, ...(operation === 'search' ? { query: target } : { url: target }), request_id: REQUEST_ID() }),
++      signal,
++    })
++  } catch {
++    throw new UserError('webSearchUnavailable')
++  }
++  if (response.status === 403) throw new UserError('webSearchDisabled')
++  if (!response.ok) throw new UserError('webSearchFailed', { status: String(response.status) })
++}
++
++function webError(code: 'webSearchFailed' | 'webFetchFailed'): never {
++  throw new UserError(code, { status: 'provider' })
++}
++
++export function webTools(context: Context): Tool[] {
++  return [
++    tool({
++      name: 'orchestrator_web_search',
++      description: 'Search the external web after Company Agent authorization; return citeable sources.',
++      schema: z.object({ query: z.string().trim().min(1).max(2000) }).strict(),
++      execute: async ({ query }, signal) => {
++        await authorize('search', query, signal)
++        let result: WebSearchResult
++        try { result = await webRuntime(context).search({ query, maxResults: MAX_RESULTS }, signal) } catch { webError('webSearchFailed') }
++        return {
++          query,
++          retrieved_at: new Date().toISOString(),
++          ...(result.content ? { content: result.content } : {}),
++          truncated: result.truncated,
++          sources: result.sources.map(source => ({
++            url: source.url,
++            ...(source.title ? { title: source.title } : {}),
++            ...(source.snippet ? { snippet: source.snippet } : {}),
++            ...(source.publishedAt ? { published_at: source.publishedAt } : {}),
++          })),
++        }
++      },
++    }),
++    tool({
++      name: 'orchestrator_web_fetch',
++      description: 'Read one web page after Company Agent authorization; prefer URLs returned by search.',
++      schema: z.object({ url: z.string().trim().url().max(2000) }).strict(),
++      execute: async ({ url }, signal) => {
++        await authorize('fetch', url, signal)
++        let result: WebFetchResult
++        try { result = await webRuntime(context).fetch({ url }, signal) } catch { webError('webFetchFailed') }
++        return {
++          requested_url: url,
++          final_url: result.url,
++          status_code: result.statusCode,
++          content_type: result.body.kind,
++          content: result.body.content,
++          truncated: result.truncated,
++          retrieved_at: new Date().toISOString(),
++        }
++      },
++    }),
++  ]
++}
+diff --git a/src/core/errors.ts b/src/core/errors.ts
+index 25959b2..a41fa74 100644
+--- a/src/core/errors.ts
++++ b/src/core/errors.ts
+@@ -46,6 +46,10 @@ export const USER_ERRORS = {
+   nothingToSync: ['refused', 'The {source} Source\'s part of the Policy has nothing to sync from, or the Source is off or waiting for setup'],
+   knowledgeSearchUnavailable: ['refused', 'The shared knowledge search service is not configured or reachable'],
+   knowledgeSearchFailed: ['refused', 'The shared knowledge search failed (HTTP {status})'],
++  webSearchDisabled: ['refused', 'External web search is disabled by Company Agent control settings'],
++  webSearchUnavailable: ['refused', 'The controlled web search gateway or DSH web provider is not configured or reachable'],
++  webSearchFailed: ['refused', 'The controlled web search failed ({status})'],
++  webFetchFailed: ['refused', 'The controlled web page fetch failed ({status})'],
+ } as const satisfies Record<string, readonly ['missing' | 'refused', string]>
+ export type UserErrorCode = keyof typeof USER_ERRORS
+ 
+diff --git a/tests/bundle-patch.spec.ts b/tests/bundle-patch.spec.ts
+index 33c027a..780e096 100644
+--- a/tests/bundle-patch.spec.ts
++++ b/tests/bundle-patch.spec.ts
+@@ -37,7 +37,7 @@ it('defines the worker preset Executor Sessions run under, with a shell that mov
+   expect(named('@deepseek-ai/dsh-bash-sandbox')).toEqual([{ timeoutMs: 5000, maxTimeoutMs: 5000 }])
+   expect(named('@deepseek-ai/dsh-pwsh-sandbox')).toEqual([{ timeoutMs: 5000, maxTimeoutMs: 5000 }])
+   expect(named('@deepseek-ai/dsh-tool-jobs')).toEqual([{ waitTimeoutMs: 5000, maxWaitTimeoutMs: 5000 }])
+-  expect(named('@deepseek-ai/dsh-tool-web')).toEqual([expect.objectContaining({ fetch: false })])
++  expect(named('@deepseek-ai/dsh-tool-web')).toEqual([expect.objectContaining({ search: false, fetch: false })])
+   // Spawned subagents run under standard, whose shell moves a command to the background only after 60 s; forked ones, which would run under
+   // this preset, are left out.
+   expect(named('@deepseek-ai/dsh-tool-subagent')).toEqual([expect.objectContaining({ provider: 'spawn', agentPreset: 'standard' })])
+diff --git a/tests/model-surface.spec.ts b/tests/model-surface.spec.ts
+index 3175711..1f89617 100644
+--- a/tests/model-surface.spec.ts
++++ b/tests/model-surface.spec.ts
+@@ -37,7 +37,8 @@ interface Skill { name: string; description: string; content: string }
+  * Maximum combined character count of system prompt and tool definitions per role (~5% above baseline).
+  * Lower this limit when shrinking model-facing text; raise it only intentionally and explain why in the commit message.
+  */
+-const BUDGET: Record<Role, number> = { orchestrator: 60_000, worker: 40_500 }
++// The controlled web search/fetch pair is an intentional model-surface expansion; keep a small explicit headroom for it.
++const BUDGET: Record<Role, number> = { orchestrator: 61_000, worker: 40_500 }
+ const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
+ const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
+ const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'
+@@ -350,7 +351,7 @@ function failures(): Map<string, string> {
+ it('collects both roles\' tools, prompts, skills and inputs', () => {
+   expect([...toolsOf('worker').keys()].sort()).toEqual(['orchestrator_ack', 'orchestrator_read', 'orchestrator_report',
+     'orchestrator_thread_follow',
+-    'orchestrator_thread_unrelated', 'orchestrator_trigger_handback'])
++    'orchestrator_thread_unrelated', 'orchestrator_trigger_handback', 'orchestrator_web_fetch', 'orchestrator_web_search'])
+   expect([...toolsOf('orchestrator').keys()]).toEqual(expect.arrayContaining(['orchestrator_route', 'orchestrator_eval_decide', 'orchestrator_reply']))
+   // The one routing tool takes the place of four.
+   for (const name of ['orchestrator_ticket_accept', 'orchestrator_ticket_attach', 'orchestrator_ticket_stop', 'orchestrator_trigger_ignore']) {
+diff --git a/tests/web-tools.spec.ts b/tests/web-tools.spec.ts
+new file mode 100644
+index 0000000..febe442
+--- /dev/null
++++ b/tests/web-tools.spec.ts
+@@ -0,0 +1,41 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { webTools } from '../src/app/tools/web.ts'
++
++const context = { web: {
++  search: vi.fn(async () => ({ content: 'answer', truncated: false,
++    sources: [{ url: 'https://example.com/source', title: 'Source', snippet: 'Evidence', publishedAt: '2026-11-18' }] })),
++  fetch: vi.fn(async ({ url }: { url: string }) => ({ url, statusCode: 200, body: { kind: 'text' as const, content: 'page' }, truncated: false })),
++} }
++
++afterEach(() => {
++  vi.unstubAllGlobals()
++  vi.unstubAllEnvs()
++  vi.clearAllMocks()
++})
++
++describe('controlled web tools', () => {
++  it('refuses before calling the DSH web seam when the Company Agent switch is off', async () => {
++    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'web search is disabled' }), { status: 403 })))
++    const search = webTools(context as never).find(tool => tool.name === 'orchestrator_web_search')!
++    await expect(search.execute({ query: 'current status' }, new AbortController().signal)).rejects.toMatchObject({ code: 'webSearchDisabled' })
++    expect(context.web.search).not.toHaveBeenCalled()
++  })
++
++  it('authorizes then returns citeable sources and retrieval time', async () => {
++    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ authorized: true }), { status: 200 })))
++    const search = webTools(context as never).find(tool => tool.name === 'orchestrator_web_search')!
++    const result = await search.execute({ query: 'current status' }, new AbortController().signal) as Record<string, unknown>
++    expect(context.web.search).toHaveBeenCalledWith({ query: 'current status', maxResults: 8 }, expect.any(AbortSignal))
++    expect(result).toMatchObject({ query: 'current status', content: 'answer', truncated: false,
++      sources: [{ url: 'https://example.com/source', title: 'Source', snippet: 'Evidence', published_at: '2026-11-18' }] })
++    expect(typeof result.retrieved_at).toBe('string')
++  })
++
++  it('uses the same gate for page fetches', async () => {
++    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ authorized: true }), { status: 200 })))
++    const fetchTool = webTools(context as never).find(tool => tool.name === 'orchestrator_web_fetch')!
++    const result = await fetchTool.execute({ url: 'https://example.com/page' }, new AbortController().signal) as Record<string, unknown>
++    expect(context.web.fetch).toHaveBeenCalledWith({ url: 'https://example.com/page' }, expect.any(AbortSignal))
++    expect(result).toMatchObject({ requested_url: 'https://example.com/page', final_url: 'https://example.com/page', status_code: 200, content: 'page' })
++  })
++})

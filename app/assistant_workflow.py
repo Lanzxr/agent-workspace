@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .control_plane import ControlPlane, InvalidTransition, NotFound
-from .dssuperagent import DssuperAgentAdapter, DssuperAgentError, DssuperAgentProtocolError
+from .dssuperagent import (DEFAULT_DECISION_TIMEOUT_SECONDS, DssuperAgentAdapter, DssuperAgentError,
+                           DssuperAgentProtocolError, DssuperAgentReceipt)
 from .execution import ExecutionDispatcher
+from .knowledge.service import KnowledgeService
 from .models import AssistantRun, Event, ExecutionResult, PlanStep, WorkPlan
+from .reply_contract import final_reply_markers
 from .workspace import WorkspaceManager
 
 
@@ -47,8 +50,9 @@ class DssuperAgentWorkflow:
         *,
         manager: WorkspaceManager | None = None,
         dispatcher: ExecutionDispatcher | None = None,
+        knowledge_service: KnowledgeService | None = None,
         policy: AssistantPolicy = AssistantPolicy(),
-        decision_timeout: float = 120,
+        decision_timeout: float = DEFAULT_DECISION_TIMEOUT_SECONDS,
         max_context_events: int = 10,
     ) -> None:
         if (manager is None) != (dispatcher is None):
@@ -59,6 +63,7 @@ class DssuperAgentWorkflow:
         self.upstream = upstream
         self.manager = manager
         self.dispatcher = dispatcher
+        self.knowledge_service = knowledge_service or (dispatcher.knowledge_service if dispatcher else None)
         self.policy = policy
         self.decision_timeout = decision_timeout
         self.max_context_events = max_context_events
@@ -66,6 +71,8 @@ class DssuperAgentWorkflow:
     def process_event(self, event: Event, *, workspace_id: str | None = None) -> AssistantRun:
         """Submit one event, persist its proposal, and auto-run only policy-allowed capabilities."""
         run = self._load_or_start(event)
+        saved_event = self.plane.get_event(event.event_id)
+        event = replace(saved_event, knowledge_grant=event.knowledge_grant)
         if run.status in self.TERMINAL_RUN_STATUSES:
             return run
 
@@ -73,9 +80,12 @@ class DssuperAgentWorkflow:
             if run.policy_version != self.policy.version:
                 raise InvalidTransition("assistant run was created under a different policy version")
             if run.decision is None:
-                receipt = self.upstream.submit_event(event, context=self._context(event, run.thread_id))
-                run.upstream_trigger_id = receipt.trigger_id
-                run.upstream_thread_key = receipt.thread_key
+                if run.upstream_trigger_id and run.upstream_thread_key:
+                    receipt = DssuperAgentReceipt("duplicate", run.upstream_trigger_id, run.upstream_thread_key)
+                else:
+                    receipt = self.upstream.submit_event(event, context=self._context(event, run.thread_id))
+                    run.upstream_trigger_id = receipt.trigger_id
+                    run.upstream_thread_key = receipt.thread_key
                 run.status = "awaiting_decision"
                 self.plane.save_assistant_run(run)
                 if receipt.status == "filtered":
@@ -98,6 +108,7 @@ class DssuperAgentWorkflow:
                 return self.plane.save_assistant_run(run)
 
             capabilities = self._validate_capabilities(event, intent)
+            self._validate_knowledge_documents(event, intent)
             may_auto_execute = run.auto_authorized or (
                 workspace_id is not None
                 and self.manager is not None
@@ -166,14 +177,18 @@ class DssuperAgentWorkflow:
         self.plane.save_assistant_run(run)
         return self._execute(run, event, workspace_id, approval_refs or {})
 
-    def _load_or_start(self, event: Event) -> AssistantRun:
+    def record_event_context(self, event: Event) -> Event:
+        """Persist an event in its conversation before attachment or model work starts."""
         try:
             saved_event = self.plane.get_event(event.event_id)
         except NotFound:
             self.plane.ingest_event(event)
+            saved_event = event
         else:
-            if saved_event.to_dict() != event.to_dict():
-                raise ValueError("event_id already exists with different event content")
+            immutable = ("source_type", "source_id", "conversation_id", "actor_id", "occurred_at", "content",
+                         "capabilities", "external_actor_id")
+            if any(getattr(saved_event, name) != getattr(event, name) for name in immutable):
+                raise ValueError("event_id already exists with conflicting event content")
 
         conversation_id, thread_id = self._local_thread_ids(event)
         try:
@@ -194,6 +209,11 @@ class DssuperAgentWorkflow:
             if thread.conversation_id != conversation_id:
                 raise ValueError("local thread is associated with a different conversation")
         self.plane.attach_event_to_thread(thread_id, event.event_id)
+        return replace(saved_event, knowledge_grant=event.knowledge_grant)
+
+    def _load_or_start(self, event: Event) -> AssistantRun:
+        self.record_event_context(event)
+        conversation_id, thread_id = self._local_thread_ids(event)
         try:
             return self.plane.get_assistant_run(event.event_id)
         except NotFound:
@@ -212,9 +232,37 @@ class DssuperAgentWorkflow:
         prior = [event_id for event_id in thread.event_ids if event_id != event.event_id]
         return [
             {"event_id": item.event_id, "actor_id": item.actor_id,
-             "occurred_at": item.occurred_at, "content": item.content[:12000]}
+             "occurred_at": item.occurred_at, "content": self._context_content(item)}
             for item in (self.plane.get_event(event_id) for event_id in prior[-self.max_context_events:])
         ]
+
+    @staticmethod
+    def _context_content(event: Event) -> str:
+        """Keep prior attachments visible to DSSuperAgent without widening its schema.
+
+        Historical context is intentionally sent through the existing text-only
+        context contract. Only non-secret metadata is included; attachment URLs
+        and any provider-specific fields never cross this boundary.
+        """
+        content = event.content[:12000]
+        if not event.attachments:
+            return content
+        details: list[str] = []
+        for index, attachment in enumerate(event.attachments[:10], start=1):
+            if not isinstance(attachment, dict):
+                continue
+            fields: list[str] = []
+            for key in ("attachment_id", "filename", "content_type", "occurred_at", "received_at", "status",
+                        "document_id", "content_hash", "size_bytes", "sensitive"):
+                value = attachment.get(key)
+                if isinstance(value, (str, int)) and str(value).strip():
+                    fields.append(f"{key}={str(value)[:300]}")
+            if fields:
+                details.append(f"附件 {index}: " + "; ".join(fields))
+        if not details:
+            return content
+        suffix = "\n[历史消息附件信息]\n" + "\n".join(details)
+        return (content + suffix)[:12000]
 
     @staticmethod
     def _local_thread_ids(event: Event) -> tuple[str, str]:
@@ -231,6 +279,20 @@ class DssuperAgentWorkflow:
         if not capabilities:
             raise DssuperAgentProtocolError("proposed work has no executable capability")
         return capabilities
+
+    def _validate_knowledge_documents(self, event: Event, intent: dict[str, Any]) -> None:
+        steps = intent.get("plan_steps", [])
+        selected = [document_id for step in steps for document_id in step.get("knowledge_document_ids", [])]
+        selected_attachments = [attachment_id for step in steps for attachment_id in step.get("attachment_ids", [])]
+        if not selected and not selected_attachments:
+            return
+        service = self.knowledge_service
+        if service is None:
+            raise DssuperAgentProtocolError("DSSuperAgent selected files but the knowledge service is not configured")
+        if selected:
+            service.authorize_documents(event, list(dict.fromkeys(selected)))
+        if selected_attachments:
+            service.authorize_attachments(event, list(dict.fromkeys(selected_attachments)), require_original=False)
 
     def _ensure_proposal(self, event: Event, run: AssistantRun, intent: dict[str, Any], *, risk_class: str) -> AssistantRun:
         suffix = hashlib.sha256(event.event_id.encode("utf-8")).hexdigest()[:24]
@@ -273,18 +335,25 @@ class DssuperAgentWorkflow:
         if not isinstance(intent, dict):
             raise ValueError("assistant run has no persisted intent")
         self._validate_capabilities(event, intent)
+        self._validate_knowledge_documents(event, intent)
         self.manager.provision(workspace_id)
+        qq_reply = event.source_type.startswith("qq.")
         item = self.plane.get_work_item(run.work_item_id)
         if item.status == "accepted":
             self.plane.queue_work_item(item.work_item_id)
         elif item.status not in {"queued", "running", "completed"}:
             raise InvalidTransition(f"work item is {item.status}, not authorized for execution")
         plan = self._get_or_create_plan(run)
+        final_ordinal = max((step.ordinal for step in plan.steps), default=0)
         for step in plan.steps:
             execution_id = self._execution_id(event.event_id, step.ordinal)
+            artifact_name = f"executions/{execution_id}/step-{step.ordinal:02d}-result.md"
+            reply_token = execution_id if qq_reply and step.ordinal == final_ordinal else None
             try:
                 request = self.plane.get_execution(execution_id)
             except NotFound:
+                knowledge_document_ids = list(dict.fromkeys(step.knowledge_document_ids))
+                attachment_ids = list(dict.fromkeys(step.attachment_ids))
                 request = self.plane.create_execution_request(
                     execution_id=execution_id,
                     work_item_id=run.work_item_id,
@@ -292,8 +361,13 @@ class DssuperAgentWorkflow:
                     workspace_id=workspace_id,
                     capability=step.capability or "",
                     parameters={
-                        "prompt": self._step_prompt(step),
-                        "expected_artifacts": [f"step-{step.ordinal:02d}-result.md"],
+                        "prompt": self._step_prompt(step, artifact_name, qq_reply=qq_reply,
+                                                    reply_token=reply_token),
+                        "expected_artifacts": [artifact_name],
+                        "timeout_seconds": 300 if qq_reply else 240,
+                        "knowledge_document_ids": knowledge_document_ids,
+                        "attachment_ids": attachment_ids,
+                        "require_user_reply": reply_token is not None,
                     },
                     approval_ref=approval_refs.get(step.capability or ""),
                 )
@@ -307,6 +381,7 @@ class DssuperAgentWorkflow:
             record = self._execution_record(run, execution_id)
             record.update({
                 "status": result.status,
+                "output": result.output[:4000],
                 "artifact_refs": result.artifact_refs,
                 "error": result.error,
             })
@@ -346,6 +421,8 @@ class DssuperAgentWorkflow:
                     objective=value["objective"],
                     capability=value["capability"],
                     completion_conditions=value.get("completion_conditions", []),
+                    knowledge_document_ids=value.get("knowledge_document_ids", []),
+                    attachment_ids=value.get("attachment_ids", []),
                 ))
             plan = self.plane.create_plan(plan_id=run.plan_id or "", work_item_id=run.work_item_id or "",
                                           steps=plan_steps)
@@ -357,10 +434,27 @@ class DssuperAgentWorkflow:
         return f"assistant_{suffix}_{ordinal}"
 
     @staticmethod
-    def _step_prompt(step: PlanStep) -> str:
+    def _step_prompt(step: PlanStep, artifact_name: str, *, qq_reply: bool = False,
+                     reply_token: str | None = None) -> str:
         conditions = step.completion_conditions or [step.objective or step.title]
         lines = [step.objective or step.title, "", "Completion conditions:", *(f"- {item}" for item in conditions),
-                 "", f"Write a concise evidence report to artifacts/step-{step.ordinal:02d}-result.md."]
+                 "", f"Write a concise evidence report to artifacts/{artifact_name}."]
+        if qq_reply:
+            lines.extend([
+                "",
+                "执行边界：只在当前 Agent Workspace 内处理文件并写入指定报告，不得向 QQ 或其他外部渠道发送消息。",
+                "Company Agent 负责向 QQ 用户发送结果。报告应使用中文，不要把发送状态、执行过程、工具记录或交给 Company Agent 的指示当成答复内容。",
+            ])
+        if reply_token is not None:
+            begin, end = final_reply_markers(reply_token)
+            lines.extend([
+                "",
+                "最终答复格式：在报告中恰好写入以下一对标记，且只把可直接回复用户的完整结论放在标记之间。",
+                begin,
+                "（在此写给用户的最终结论，最多 1500 个汉字和标点；不要写执行说明、发送状态或内部日志。）",
+                end,
+                "标记外的文字不会发送；缺少标记或内容超长会使本次任务被判定为未完成。",
+            ])
         return "\n".join(lines)
 
     @staticmethod

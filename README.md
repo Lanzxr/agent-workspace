@@ -39,7 +39,13 @@ Company Agent 是一个通用的公司内部自主助理平台。它观察经过
 - [DSH 执行契约](contracts/dsh-execution.md)
 - [Step 3 DSH 接入与验收](docs/04-step3-dsh.md)
 - [Step 4 DSSuperAgent 接入与验收](docs/05-step4-dssuperagent.md)
+- [长期资料库与 AnythingLLM 接入](docs/09-knowledge-base.md)
 - [DSSuperAgent Step 4 桥接补丁](patches/dssuperagent-company-agent-step4.patch)
+- [DSSuperAgent 资料库检索补丁](patches/dssuperagent-knowledge-bridge.patch)
 - [实施步骤](docs/02-implementation-plan.md)
 - [原始需求归档](source/README.md)
+
+## 长期资料库
+
+QQ 长期资料库由 Company Agent 接入自托管 AnythingLLM。Company Agent 保管原件并在服务端校验群聊、私聊和管理员权限；DSSuperAgent 通过受控查询接口取得证据，DSH 不连接资料库。部署和迁移说明见 [AnythingLLM 接入说明](docs/09-knowledge-base.md)。500 MiB 是应用与代理目标限制，AnythingLLM 的真实解析能力仍须在部署环境通过大文件联调验收。
 
