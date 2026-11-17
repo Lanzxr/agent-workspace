@@ -26,7 +26,7 @@
 
 ## DSSuperAgent 桥接补丁
 
-上游需要 Company Agent 专用 Source、事件接收 API 和 `assistant_intent` 结构化输出。项目保存了可复现补丁：[dssuperagent-company-agent-step4.patch](../patches/dssuperagent-company-agent-step4.patch)。补丁基于 DSSuperAgent 提交 `8c32a9dc5d72c033816c6a8110b37f40cf94fba4`。
+上游需要 Company Agent 专用 Source、事件接收 API、`assistant_intent` 结构化输出和受控联网工具。项目保存了可复现补丁：[Step 4 基础桥接](../patches/dssuperagent-company-agent-step4.patch)、[资料库检索扩展](../patches/dssuperagent-knowledge-bridge.patch) 和 [受控联网搜索](../patches/dssuperagent-controlled-web-search.patch)。后两个补丁须按顺序在基础桥接补丁之后应用，联网补丁最后应用。基础补丁基于 DSSuperAgent 提交 `8c32a9dc5d72c033816c6a8110b37f40cf94fba4`。
 
 在专用的 DSSuperAgent checkout 中应用，不要复用带有个人配置、DSH_HOME 或状态库的运行目录：
 
@@ -34,6 +34,10 @@
 git rev-parse HEAD
 git apply --check /path/to/company-agent/patches/dssuperagent-company-agent-step4.patch
 git apply /path/to/company-agent/patches/dssuperagent-company-agent-step4.patch
+git apply --check /path/to/company-agent/patches/dssuperagent-knowledge-bridge.patch
+git apply /path/to/company-agent/patches/dssuperagent-knowledge-bridge.patch
+git apply --check /path/to/company-agent/patches/dssuperagent-controlled-web-search.patch
+git apply /path/to/company-agent/patches/dssuperagent-controlled-web-search.patch
 pnpm typecheck
 pnpm exec vitest run --reporter=dot
 pnpm build

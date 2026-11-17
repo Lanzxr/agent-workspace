@@ -18,6 +18,8 @@ class QQBotSettings:
     client_secret: str = field(repr=False)
     allowed_publications: frozenset[str] = frozenset()
     api_base_url: str = "https://api.bot.qq.com"
+    auto_execute_capabilities: frozenset[str] = frozenset()
+    workspace_id: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> "QQBotSettings":
@@ -39,7 +41,16 @@ class QQBotSettings:
         parsed = urlsplit(api_base_url)
         if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise ValueError("QQBOT_API_BASE_URL must be an HTTPS base URL without credentials or query")
-        return cls(app_id, client_secret, allowed, api_base_url)
+        auto_execute = frozenset(value.strip() for value in values.get("QQBOT_AUTO_EXECUTE_CAPABILITIES", "").split(",")
+                                 if value.strip())
+        if not auto_execute.issubset({"dsh.task"}):
+            raise ValueError("QQBOT_AUTO_EXECUTE_CAPABILITIES currently supports only dsh.task")
+        workspace_id = values.get("COMPANY_AGENT_QQ_WORKSPACE", "").strip() or None
+        if auto_execute and not workspace_id:
+            raise ValueError("COMPANY_AGENT_QQ_WORKSPACE is required when QQ task execution is enabled")
+        if workspace_id and (len(workspace_id) > 64 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", workspace_id)):
+            raise ValueError("COMPANY_AGENT_QQ_WORKSPACE must be a 1-64 character workspace ID")
+        return cls(app_id, client_secret, allowed, api_base_url, auto_execute, workspace_id)
 
 
 @dataclass(frozen=True)

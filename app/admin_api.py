@@ -12,13 +12,15 @@ from urllib.parse import parse_qs, urlsplit
 
 from .control_plane import ControlPlane
 from .identity import IdentityRegistry
+from .knowledge.service import KnowledgeService
 from .scheduler import ScheduleService
 from .scheduler import SchedulerWorker
 from .workspace import WorkspaceError, WorkspaceManager
 from .workspace_runtime import WorkspaceRuntime
 
 
-def make_handler(plane: ControlPlane, data_directory: Path, token: str):
+def make_handler(plane: ControlPlane, data_directory: Path, token: str,
+                 knowledge_service: KnowledgeService | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "CompanyAgentConsole/1.0"
 
@@ -67,11 +69,20 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str):
                     qq_state = qq.get("state") if age <= 90 else "offline"
                 except (TypeError, ValueError):
                     qq_state = "unknown"
+                dsh_web_enabled = bool(plane.get_setting("web_search_enabled", False))
+                dssuperagent_web_enabled = bool(plane.get_setting("dssuperagent_web_search_enabled", False))
                 return self._send(200, {"service": "running", "work_items": {row[0]: row[1] for row in rows},
                                         "qq_gateway": qq_state,
-                                        "web_search_enabled": bool(plane.get_setting("web_search_enabled", False)),
+                                        "web_search_enabled": dsh_web_enabled,
+                                        "dsh_web_search_enabled": dsh_web_enabled,
+                                        "dssuperagent_web_search_enabled": dssuperagent_web_enabled,
                                         "workspace_bytes": _directory_size(data_directory / "workspaces"),
                                         "data_directory": str(data_directory)})
+            if path == "/api/knowledge" and method == "GET":
+                if knowledge_service is None:
+                    return self._send(200, {"configured": False, "documents": {}})
+                return self._send(200, {**knowledge_service.summary(),
+                                        "items": knowledge_service.list_documents(limit=100)})
             if path == "/api/users" and method == "GET":
                 return self._send(200, {"users": [u.__dict__ for u in IdentityRegistry(plane.store).list_users()]})
             if path == "/api/users" and method == "POST":
@@ -114,13 +125,25 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str):
                 schedule_id = self._body().get("schedule_id", "")
                 return self._send(200, ScheduleService(plane.store).retry(schedule_id).__dict__)
             if path == "/api/settings/web-search" and method == "GET":
-                return self._send(200, {"enabled": bool(plane.get_setting("web_search_enabled", False))})
+                enabled = bool(plane.get_setting("web_search_enabled", False))
+                return self._send(200, {"enabled": enabled, "dsh_enabled": enabled,
+                                        "dssuperagent_enabled": bool(plane.get_setting("dssuperagent_web_search_enabled", False))})
             if path == "/api/settings/web-search" and method == "PUT":
                 enabled = self._body().get("enabled")
                 if not isinstance(enabled, bool):
                     raise ValueError("enabled must be a boolean")
                 plane.set_setting("web_search_enabled", enabled)
                 return self._send(200, {"enabled": enabled})
+            if path in {"/api/settings/dsh-web-search", "/api/settings/dssuperagent-web-search"} and method == "GET":
+                key = "web_search_enabled" if path.endswith("dsh-web-search") else "dssuperagent_web_search_enabled"
+                return self._send(200, {"enabled": bool(plane.get_setting(key, False))})
+            if path in {"/api/settings/dsh-web-search", "/api/settings/dssuperagent-web-search"} and method == "PUT":
+                enabled = self._body().get("enabled")
+                if not isinstance(enabled, bool):
+                    raise ValueError("enabled must be a boolean")
+                key = "web_search_enabled" if path.endswith("dsh-web-search") else "dssuperagent_web_search_enabled"
+                plane.set_setting(key, enabled)
+                return self._send(200, {"enabled": enabled, "setting": key})
             if path == "/api/logs" and method == "GET":
                 rows = plane.store.connection.execute("SELECT entity_type,entity_id,action,payload,created_at "
                     "FROM audit ORDER BY audit_id DESC LIMIT 100").fetchall()
@@ -153,10 +176,11 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str):
 
 
 def serve(plane: ControlPlane, data_directory: Path, host: str, port: int, token: str,
-          scheduler_worker: SchedulerWorker | None = None) -> None:
+          scheduler_worker: SchedulerWorker | None = None, *,
+          knowledge_service: KnowledgeService | None = None) -> None:
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("admin console can only bind to loopback; use an authenticated reverse proxy for remote access")
-    server = HTTPServer((host, port), make_handler(plane, data_directory, token))
+    server = HTTPServer((host, port), make_handler(plane, data_directory, token, knowledge_service))
     stop = threading.Event()
     worker_thread = None
     if scheduler_worker:
