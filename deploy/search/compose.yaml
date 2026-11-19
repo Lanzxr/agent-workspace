@@ -1,0 +1,19 @@
+services:
+  search:
+    image: docker.io/searxng/searxng@sha256:0b9f3ddd85efc8df189e6543d65702abfa8f3ed1c32229a53f7707cd12b554ef
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?Set a random secret in the private deployment env file}
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE]
+    security_opt: [no-new-privileges:true]
+networks:
+  default:
+    name: company-agent-search-network
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-agent-search

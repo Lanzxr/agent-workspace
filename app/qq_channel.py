@@ -335,33 +335,43 @@ class QQChannelService:
         disposition = recommendation.get("recommendation")
         if disposition not in {"suppress", "private_nudge", "group_update", "urgent_escalation"}:
             return
-        allowed = disposition in self.settings.allowed_publications
-        chosen = disposition if allowed else "suppress"
-        body = recommendation.get("body") if allowed else ""
+        requested_disposition = disposition
+        chosen = disposition if disposition in self.settings.allowed_publications else "suppress"
+        policy_note = ""
+        if chosen == "suppress" and disposition == "private_nudge" and "group_update" in self.settings.allowed_publications:
+            chosen = "group_update"
+            policy_note = "publication fallback: private_nudge -> group_update because QQ private publication is unavailable"
+        elif chosen == "suppress" and disposition != "suppress":
+            policy_note = f"publication blocked: {disposition} is not allowlisted for this QQ channel"
+        publishable = chosen != "suppress"
+        body = recommendation.get("body") if publishable else ""
         if not isinstance(body, str):
             body = ""
-        if allowed and status == "observed":
+        if publishable and status == "observed":
             body = body or "这条消息已收到，当前没有形成需要执行的任务。"
-        elif allowed and status == "completed":
+        elif publishable and status == "completed":
             result = self._completed_artifact_text(run)
             body = ("处理完成：\n" + result) if result else (
                 "处理未完成：没有生成可投递的最终答复，因此未发送执行说明。"
             )
-        elif allowed and status == "execution_failed":
+        elif publishable and status == "execution_failed":
             detail = str(run.get("error") or "执行失败")[:500]
             body = f"这项任务没有完成，失败阶段：{detail}"
         body = body[:1800]
         digest = hashlib.sha256(event.event_id.encode("utf-8")).hexdigest()[:24]
+        reason = str(recommendation.get("reason", ""))[:1000] or "QQ channel publication policy"
+        if policy_note:
+            reason = f"{reason}; {policy_note} (requested={requested_disposition}, chosen={chosen})"
         self.plane.decide_publication(
             decision_id=f"qq-publication-{digest}",
             work_item_id=work_item_id,
             conversation_id=run.get("conversation_id") or event.conversation_id,
             disposition=chosen,
-            reason=str(recommendation.get("reason", ""))[:1000] or "QQ channel publication policy",
+            reason=reason,
             policy_version=str(run.get("policy_version", "qq-channel-v1")),
             body=body,
             idempotency_key=f"qq-publication:{event.event_id}",
-            destination=destination if allowed else None,
+            destination=destination if publishable else None,
         )
 
     def _completed_artifact_text(self, run: dict[str, Any]) -> str | None:

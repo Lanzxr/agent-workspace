@@ -30,6 +30,24 @@ from .workspace import WorkspaceError, WorkspaceManager
 from .web_gate import WebGateServer, WebGateSettings
 
 
+def _start_web_gate(plane, config: Path, settings: WebGateSettings) -> WebGateServer:
+    server = WebGateServer(
+        settings,
+        enabled=lambda: bool(plane.get_setting("dssuperagent_web_search_enabled",
+                                                _initial_flag(config, "AGENT_DSSUPERAGENT_WEB_SEARCH_ENABLED"))),
+        audit=lambda action, payload: plane.record_external_audit(action, payload),
+    )
+    server.start()
+    return server
+
+
+def _configured_owner(config: Path, name: str, default: str) -> str:
+    owner = RuntimeConfig._parse_env(config).get(name, default).strip().lower()
+    if owner not in {"admin", "qq"}:
+        raise ValueError(f"{name} must be admin or qq")
+    return owner
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Company Agent development execution console")
     parser.add_argument("--data-dir", type=Path, default=Path.home() / ".local/share/company-agent")
@@ -106,13 +124,11 @@ def main() -> int:
             worker = SchedulerWorker(ScheduleService(scheduler_plane.store), ScheduledResumeHandler(channel))
             channel.flush_outbox()
             gate_settings = WebGateSettings.load(arguments.config)
-            active_web_gate = WebGateServer(
-                gate_settings,
-                enabled=lambda: bool(plane.get_setting("dssuperagent_web_search_enabled",
-                                                        _initial_flag(arguments.config, "AGENT_DSSUPERAGENT_WEB_SEARCH_ENABLED"))),
-                audit=lambda action, payload: plane.record_external_audit(action, payload),
-            )
-            active_web_gate.start()
+            if gate_settings.owner == "admin":
+                active_web_gate = _start_web_gate(plane, arguments.config, gate_settings)
+            if _configured_owner(arguments.config, "COMPANY_AGENT_KNOWLEDGE_API_OWNER", "qq") == "admin" and knowledge_service:
+                active_query_server = KnowledgeQueryServer(knowledge_service, knowledge_service.settings.query_api_port)
+                active_query_server.start()
             serve_admin(plane, data_directory, arguments.host, arguments.port, token, worker,
                         knowledge_service=knowledge_service)
             return 0
@@ -143,16 +159,10 @@ def main() -> int:
             threading.Thread(target=service.resume_pending_attachments, name="company-agent-attachment-recovery",
                              daemon=True).start()
             gate_settings = WebGateSettings.load(arguments.config)
-            active_web_gate = WebGateServer(
-                gate_settings,
-                enabled=lambda: bool(plane.get_setting("dssuperagent_web_search_enabled",
-                                                        _initial_flag(arguments.config, "AGENT_DSSUPERAGENT_WEB_SEARCH_ENABLED"))),
-                audit=lambda action, payload: plane.record_external_audit(action, payload),
-            )
-            active_web_gate.start()
-            active_query_server = (KnowledgeQueryServer(knowledge_service, knowledge_service.settings.query_api_port)
-                                   if knowledge_service else None)
-            if active_query_server:
+            if gate_settings.owner == "qq":
+                active_web_gate = _start_web_gate(plane, arguments.config, gate_settings)
+            if _configured_owner(arguments.config, "COMPANY_AGENT_KNOWLEDGE_API_OWNER", "qq") == "qq" and knowledge_service:
+                active_query_server = KnowledgeQueryServer(knowledge_service, knowledge_service.settings.query_api_port)
                 active_query_server.start()
             asyncio.run(QQGateway(api, service.process_prepared_event,
                                   on_intake=service.prepare_gateway_event,
@@ -167,16 +177,10 @@ def main() -> int:
             event = Event.from_dict(event_value)
             knowledge_service = _load_knowledge_service(plane, arguments.config, data_directory)
             gate_settings = WebGateSettings.load(arguments.config)
-            active_web_gate = WebGateServer(
-                gate_settings,
-                enabled=lambda: bool(plane.get_setting("dssuperagent_web_search_enabled",
-                                                        _initial_flag(arguments.config, "AGENT_DSSUPERAGENT_WEB_SEARCH_ENABLED"))),
-                audit=lambda action, payload: plane.record_external_audit(action, payload),
-            )
-            active_web_gate.start()
-            active_query_server = (KnowledgeQueryServer(knowledge_service, knowledge_service.settings.query_api_port)
-                                   if knowledge_service else None)
-            if active_query_server:
+            if gate_settings.owner == "qq":
+                active_web_gate = _start_web_gate(plane, arguments.config, gate_settings)
+            if _configured_owner(arguments.config, "COMPANY_AGENT_KNOWLEDGE_API_OWNER", "qq") == "qq" and knowledge_service:
+                active_query_server = KnowledgeQueryServer(knowledge_service, knowledge_service.settings.query_api_port)
                 active_query_server.start()
             if knowledge_service and event.source_type.startswith("qq."):
                 from dataclasses import replace

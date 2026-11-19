@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hashlib
 import hmac
 import json
 import threading
@@ -9,6 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
+
+from .web_search import SearxngSearch
 
 from .runtime_config import RuntimeConfig
 
@@ -20,6 +24,9 @@ class WebGateSettings:
     host: str = "127.0.0.1"
     port: int = 8767
     api_key: str = ""
+    search_url: str = "http://127.0.0.1:8888/search"
+    search_timeout_seconds: float = 20.0
+    owner: str = "admin"
 
     @classmethod
     def load(cls, path: Path) -> "WebGateSettings":
@@ -38,11 +45,27 @@ class WebGateSettings:
                    or values.get("COMPANY_AGENT_KNOWLEDGE_API_KEY") or "").strip()
         if api_key and len(api_key) < 32:
             raise ValueError("COMPANY_AGENT_WEB_GATE_API_KEY must contain at least 32 characters")
-        return cls(host, port, api_key)
+        search_url = (values.get("COMPANY_AGENT_WEB_SEARCH_URL") or "http://127.0.0.1:8888/search").strip()
+        parsed_search_url = urlsplit(search_url)
+        if (parsed_search_url.scheme not in {"http", "https"} or not parsed_search_url.hostname
+                or parsed_search_url.username or parsed_search_url.password or parsed_search_url.query
+                or parsed_search_url.fragment):
+            raise ValueError("COMPANY_AGENT_WEB_SEARCH_URL must be an HTTP(S) endpoint without credentials or query")
+        try:
+            search_timeout = float(values.get("COMPANY_AGENT_WEB_SEARCH_TIMEOUT_SECONDS", "20"))
+        except ValueError as error:
+            raise ValueError("COMPANY_AGENT_WEB_SEARCH_TIMEOUT_SECONDS must be numeric") from error
+        if not 1 <= search_timeout <= 60:
+            raise ValueError("COMPANY_AGENT_WEB_SEARCH_TIMEOUT_SECONDS must be between 1 and 60")
+        owner = (values.get("COMPANY_AGENT_WEB_GATE_OWNER") or "admin").strip()
+        if owner not in {"admin", "qq"}:
+            raise ValueError("COMPANY_AGENT_WEB_GATE_OWNER must be admin or qq")
+        return cls(host, port, api_key, search_url, search_timeout, owner)
 
 
 def make_handler(*, enabled: Callable[[], bool], api_key: str = "",
-                 audit: Callable[[str, dict[str, Any]], None] | None = None):
+                 audit: Callable[[str, dict[str, Any]], None] | None = None,
+                 search: Callable[[str, int], dict[str, Any]] | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "CompanyAgentWebGate/1.0"
 
@@ -64,7 +87,8 @@ def make_handler(*, enabled: Callable[[], bool], api_key: str = "",
             )
 
         def do_POST(self) -> None:
-            if urlsplit(self.path).path != "/internal/web/authorize":
+            route = urlsplit(self.path).path
+            if route not in {"/internal/web/authorize", "/internal/web/search"}:
                 self._send(404, {"error": "not found"})
                 return
             if not self._authorized():
@@ -77,7 +101,8 @@ def make_handler(*, enabled: Callable[[], bool], api_key: str = "",
                 value = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(value, dict):
                     raise ValueError("request body must be an object")
-                operation = value.get("operation")
+                is_search = route == "/internal/web/search"
+                operation = "search" if is_search else value.get("operation")
                 if operation not in {"search", "fetch"}:
                     raise ValueError("operation must be search or fetch")
                 target_key = "query" if operation == "search" else "url"
@@ -87,11 +112,38 @@ def make_handler(*, enabled: Callable[[], bool], api_key: str = "",
                 request_id = value.get("request_id", "")
                 if request_id is not None and (not isinstance(request_id, str) or len(request_id) > 200):
                     raise ValueError("request_id must be at most 200 characters")
-                record = {"operation": operation, target_key: target, "request_id": request_id or ""}
+                if operation == "search":
+                    record = {"operation": operation, "query_sha256": hashlib.sha256(target.strip().encode("utf-8")).hexdigest(),
+                              "request_id": request_id or ""}
+                else:
+                    parsed_target = urlsplit(target)
+                    record = {"operation": operation, "host": (parsed_target.hostname or "")[:255],
+                              "request_id": request_id or ""}
                 if audit:
                     audit("web_authorize", record)
                 if not enabled():
                     self._send(403, {"error": "web search is disabled"})
+                    return
+                if is_search:
+                    if search is None:
+                        self._send(503, {"error": "web search backend is unavailable"})
+                        return
+                    max_results = value.get("max_results", 8)
+                    if not isinstance(max_results, int) or isinstance(max_results, bool) or not 1 <= max_results <= 8:
+                        raise ValueError("max_results must be an integer from 1 to 8")
+                    try:
+                        result = search(target.strip(), max_results)
+                        if audit:
+                            audit("web_search_completed", {
+                                "request_id": request_id or "",
+                                "source_urls": [source["url"] for source in result.get("sources", [])],
+                                "source_count": len(result.get("sources", [])),
+                            })
+                        self._send(200, result)
+                    except Exception:
+                        if audit:
+                            audit("web_search_failed", {"request_id": request_id or "", "error": "backend_failed"})
+                        self._send(502, {"error": "web search backend failed"})
                     return
                 self._send(200, {
                     "authorized": True,
@@ -111,7 +163,12 @@ class WebGateServer:
                  audit: Callable[[str, dict[str, Any]], None] | None = None) -> None:
         self.server = ThreadingHTTPServer(
             (settings.host, settings.port),
-            make_handler(enabled=enabled, api_key=settings.api_key, audit=audit),
+            make_handler(
+                enabled=enabled,
+                api_key=settings.api_key,
+                audit=audit,
+                search=SearxngSearch(settings.search_url, settings.search_timeout_seconds),
+            ),
         )
         self.server.daemon_threads = True
         self.thread = threading.Thread(target=self.server.serve_forever, name="company-agent-web-gate", daemon=True)
