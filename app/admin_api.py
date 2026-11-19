@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import sqlite3
 import sys
@@ -13,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from .control_plane import ControlPlane
 from .identity import IdentityRegistry
 from .knowledge.service import KnowledgeService
+from .observability import list_conversations, trace_for_event
 from .scheduler import ScheduleService
 from .scheduler import SchedulerWorker
 from .workspace import WorkspaceError, WorkspaceManager
@@ -60,8 +62,35 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str,
                 return self._send(404, {"error": "not found"})
             if not self._authorized():
                 return self._send(401, {"error": "unauthorized"})
+            if path == "/api/conversations" and method == "GET":
+                query = parse_qs(urlsplit(self.path).query)
+                conversation_id = query.get("conversation_id", [""])[0].strip()
+                try:
+                    limit = int(query.get("limit", ["50"])[0])
+                except ValueError as error:
+                    raise ValueError("limit must be an integer") from error
+                if conversation_id:
+                    conversations = [item for item in list_conversations(plane.store, limit=500)
+                                     if item["conversation_id"] == conversation_id]
+                    return self._send(200, {"conversation": conversations[0] if conversations else None})
+                return self._send(200, {"conversations": list_conversations(plane.store, limit=limit)})
+            if path == "/api/message-trace" and method == "GET":
+                event_id = parse_qs(urlsplit(self.path).query).get("event_id", [""])[0].strip()
+                if not event_id:
+                    raise ValueError("event_id is required")
+                trace = trace_for_event(plane.store, event_id)
+                if trace is None:
+                    return self._send(404, {"error": "event not found"})
+                return self._send(200, trace)
             if path == "/api/status" and method == "GET":
                 rows = plane.store.connection.execute("SELECT status,COUNT(*) AS count FROM work_items GROUP BY status").fetchall()
+                run_rows = plane.store.connection.execute(
+                    "SELECT status,COUNT(*) AS count FROM assistant_runs GROUP BY status").fetchall()
+                execution_rows = plane.store.connection.execute(
+                    "SELECT status,COUNT(*) AS count FROM executions GROUP BY status").fetchall()
+                active_executions = plane.store.connection.execute(
+                    "SELECT execution_id,work_item_id,status,updated_at,payload FROM executions "
+                    "WHERE status IN ('queued','running') ORDER BY updated_at DESC LIMIT 20").fetchall()
                 qq = plane.get_setting("qq_gateway", {})
                 heartbeat = qq.get("updated_at") if isinstance(qq, dict) else None
                 try:
@@ -71,7 +100,14 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str,
                     qq_state = "unknown"
                 dsh_web_enabled = bool(plane.get_setting("web_search_enabled", False))
                 dssuperagent_web_enabled = bool(plane.get_setting("dssuperagent_web_search_enabled", False))
-                return self._send(200, {"service": "running", "work_items": {row[0]: row[1] for row in rows},
+                return self._send(200, {"service": "running", "release_id": os.environ.get("COMPANY_AGENT_RELEASE_ID", "source"),
+                                        "work_items": {row[0]: row[1] for row in rows},
+                                        "dssuperagent_runs": {row[0]: row[1] for row in run_rows},
+                                        "dsh_executions": {row[0]: row[1] for row in execution_rows},
+                                        "active_dsh": [{"execution_id": row[0], "work_item_id": row[1],
+                                                        "status": row[2], "updated_at": row[3],
+                                                        "workspace_id": json.loads(row[4]).get("workspace_id")}
+                                                       for row in active_executions],
                                         "qq_gateway": qq_state,
                                         "web_search_enabled": dsh_web_enabled,
                                         "dsh_web_search_enabled": dsh_web_enabled,

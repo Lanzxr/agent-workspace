@@ -218,6 +218,7 @@ class QQServiceTests(unittest.TestCase):
         decision_id = "qq-publication-" + hashlib.sha256(self.event.event_id.encode("utf-8")).hexdigest()[:24]
         audit = self.plane.list_audit(entity_type="publication_decision", entity_id=decision_id)
         self.assertEqual(audit[-1].payload["disposition"], "suppress")
+        self.assertIn("publication blocked", audit[-1].payload["reason"])
         self.assertEqual(self.plane.list_outbox(), [])
         self.assertEqual(self.api.sent, [])
 
@@ -234,6 +235,28 @@ class QQServiceTests(unittest.TestCase):
         self.assertEqual(len(self.api.sent), 1)
         self.assertEqual(self.api.sent[0].body, "The requested file is not available yet.")
         self.assertEqual(self.plane.list_outbox()[0].status, "sent")
+
+    def test_private_nudge_falls_back_to_group_update_when_group_publication_is_allowed(self) -> None:
+        self.settings = QQBotSettings("app", "secret", frozenset({"group_update"}))
+        self.service = QQChannelService(self.plane, self.workflow, self.api, self.settings)
+        self.workflow.publication = {
+            "recommendation": "private_nudge",
+            "reason": "The repeated message appears to be a follow-up",
+            "body": "The requested file was processed.",
+        }
+        self.workflow.run_data = {"status": "observed", "publication": self.workflow.publication,
+                                  "work_item_id": None, "execution_results": []}
+
+        self.service.handle_gateway_event("GROUP_MESSAGE_CREATE", self.payload)
+
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertEqual(self.api.sent[0].body, "The requested file was processed.")
+        self.assertEqual(self.plane.list_outbox()[0].publication_disposition, "group_update")
+        import hashlib
+        decision_id = "qq-publication-" + hashlib.sha256(self.event.event_id.encode("utf-8")).hexdigest()[:24]
+        audit = self.plane.list_audit(entity_type="publication_decision", entity_id=decision_id)
+        self.assertEqual(audit[-1].payload["disposition"], "group_update")
+        self.assertIn("private_nudge", audit[-1].payload["reason"])
 
     def test_allowlisted_publication_uses_outbox_and_delivery_is_idempotent(self) -> None:
         self.settings = QQBotSettings("app", "secret", frozenset({"group_update"}))

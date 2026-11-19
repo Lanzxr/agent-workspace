@@ -1,0 +1,3 @@
+/deploy/anythingllm/apply-egress-firewall.sh text eol=lf
+/deploy/anythingllm/anythingllm-egress-firewall.service text eol=lf
+/deploy/search/compose.yaml text eol=lf

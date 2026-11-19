@@ -688,7 +688,12 @@ class ControlPlane:
                     "INSERT INTO outbox(outbox_id, idempotency_key, payload, status, created_at) VALUES (?, ?, ?, ?, ?)",
                     (outbox_id, idempotency_key, self.store.encode(message.to_dict()), message.status, now),
                 )
-            self._audit(connection, "publication_decision", decision_id, "decided", {"disposition": disposition}, now)
+            self._audit(connection, "publication_decision", decision_id, "decided", {
+                "disposition": disposition,
+                "reason": reason,
+                "policy_version": policy_version,
+                "outbox_id": outbox_id,
+            }, now)
         return decision
 
     @staticmethod

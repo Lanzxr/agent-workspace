@@ -7,7 +7,7 @@ name = "company-agent-control-plane"
 version = "0.1.0"
 description = "Generic Company Agent control plane, persistent workspaces, and DSH execution"
 requires-python = ">=3.11"
-dependencies = ["websockets>=12,<17"]
+dependencies = ["websockets>=12,<17", "tzdata>=2025.2; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 attachments = ["pypdf>=5,<7"]

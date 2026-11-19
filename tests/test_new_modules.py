@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from http.server import HTTPServer
+from http.server import HTTPServer, ThreadingHTTPServer
 from threading import Thread
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -17,13 +17,15 @@ from app.attachments import AttachmentIngestor, _resolve_attachment_addresses, e
 from app.knowledge.file_types import detect_file
 from app.control_plane import ControlPlane
 from app.identity import IdentityRegistry
-from app.models import Event
+from app.models import AssistantRun, Event, PlanStep
+from app.observability import list_conversations, trace_for_event
 from app.runtime_config import RuntimeConfig
 from app.scheduler import ScheduleService, ScheduledTask, SchedulerWorker
 from app.scheduled_resume import ScheduledResumeHandler
 from app.qq_channel import QQChannelService
 from app.runtime_config import QQBotSettings
 from app.store import Store
+from app.web_gate import make_handler as make_web_gate_handler
 
 
 class IdentityRegistryTests(unittest.TestCase):
@@ -239,9 +241,67 @@ class WebSearchConfigTests(unittest.TestCase):
 
 
 class AdminApiTests(unittest.TestCase):
+    def _seed_trace(self, plane):
+        event = Event("event-trace-1", "qq.group", "group-1", "conversation-1", "user-1",
+                      "2026-11-18T10:00:00+00:00", "请处理这个文件", [{"filename": "report.md", "status": "stored"}],
+                      ["dsh.task"], external_actor_id="qq-user-1")
+        plane.create_conversation(conversation_id=event.conversation_id, kind=event.source_type,
+                                  participant_refs=[event.actor_id], policy_version="test-policy")
+        plane.ingest_event(event)
+        plane.save_assistant_run(AssistantRun(event_id=event.event_id, status="awaiting_decision",
+                                              policy_version="test-policy", conversation_id=event.conversation_id,
+                                              thread_id="thread-1"))
+        return event
+
+    def test_conversation_view_and_message_trace_expose_pipeline_without_raw_log_dump(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plane = ControlPlane.open(Path(directory) / "control.sqlite")
+            event = self._seed_trace(plane)
+            conversations = list_conversations(plane.store)
+            self.assertEqual(conversations[0]["conversation_id"], event.conversation_id)
+            self.assertEqual(conversations[0]["messages"][0]["content"], event.content)
+            trace = trace_for_event(plane.store, event.event_id)
+            self.assertEqual(trace["status_label"], "等待 DSSuperAgent 判断")
+            self.assertEqual(trace["timeline"][0]["label"], "Company Agent 已收到消息")
+            self.assertNotIn("decision", trace["assistant_run"] or {})
+            plane.close()
+
+    def test_message_trace_links_work_execution_and_reply_states(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plane = ControlPlane.open(Path(directory) / "control.sqlite")
+            event = self._seed_trace(plane)
+            plane.create_work_item(work_item_id="work-trace-1", title="处理文件", objective="生成结论",
+                                   source_event_ids=[event.event_id], completion_conditions=["结果已生成"],
+                                   risk_class="low", owner_ref=event.actor_id)
+            plane.propose_work_item("work-trace-1")
+            plane.accept_work_item("work-trace-1")
+            plane.queue_work_item("work-trace-1")
+            plane.create_plan(plan_id="plan-trace-1", work_item_id="work-trace-1",
+                              steps=[PlanStep("step-trace-1", 1, "处理", capability="dsh.task")])
+            plane.create_execution_request(execution_id="execution-trace-1", work_item_id="work-trace-1",
+                                           plan_step_id="step-trace-1", workspace_id="workspace-trace-1",
+                                           capability="dsh.task", parameters={"prompt": "process"})
+            plane.save_assistant_run(AssistantRun(event_id=event.event_id, status="executing",
+                                                  policy_version="test-policy", conversation_id=event.conversation_id,
+                                                  thread_id="thread-1", work_item_id="work-trace-1",
+                                                  plan_id="plan-trace-1", execution_ids=["execution-trace-1"],
+                                                  workspace_id="workspace-trace-1"))
+            plane.decide_publication(decision_id="publication-trace-1", work_item_id="work-trace-1",
+                                     conversation_id=event.conversation_id, disposition="group_update",
+                                     reason="test", policy_version="test-policy", body="处理完成",
+                                     idempotency_key="qq-publication:event-trace-1",
+                                     destination={"channel": "qq", "group_openid": "group-1"})
+            trace = trace_for_event(plane.store, event.event_id)
+            self.assertEqual(trace["status_label"], "等待发送回复")
+            self.assertEqual(trace["work_item"]["work_item_id"], "work-trace-1")
+            self.assertEqual(trace["executions"][0]["status"], "queued")
+            self.assertEqual(trace["outbox"][0]["status"], "pending")
+            plane.close()
+
     def test_api_requires_bearer_token_and_returns_control_state(self):
         with tempfile.TemporaryDirectory() as directory:
             plane = ControlPlane.open(Path(directory) / "control.sqlite")
+            event = self._seed_trace(plane)
             server = HTTPServer(("127.0.0.1", 0), make_handler(plane, Path(directory), "secret-token"))
             thread = Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -275,10 +335,67 @@ class AdminApiTests(unittest.TestCase):
                 final_state = json.loads(urlopen(status_request).read())
                 self.assertTrue(final_state["dssuperagent_web_search_enabled"])
                 self.assertFalse(final_state["dsh_web_search_enabled"])
+                conversation_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/conversations",
+                    headers={"Authorization": "Bearer secret-token"})
+                conversations = json.loads(urlopen(conversation_request).read())
+                self.assertIn("conversations", conversations)
+                trace_request = Request(
+                    f"http://127.0.0.1:{server.server_port}/api/message-trace?event_id={event.event_id}",
+                    headers={"Authorization": "Bearer secret-token"})
+                trace = json.loads(urlopen(trace_request).read())
+                self.assertEqual(trace["event_id"], event.event_id)
+                self.assertEqual(trace["status_label"], "等待 DSSuperAgent 判断")
             finally:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
+                plane.close()
+
+
+    def test_console_switch_controls_dssuperagent_worker_search_immediately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plane = ControlPlane.open(Path(directory) / "control.sqlite")
+            admin_server = HTTPServer(("127.0.0.1", 0), make_handler(plane, Path(directory), "admin-token"))
+            web_server = ThreadingHTTPServer(("127.0.0.1", 0), make_web_gate_handler(
+                enabled=lambda: bool(plane.get_setting("dssuperagent_web_search_enabled", False)),
+                api_key="bridge-secret",
+                search=lambda query, count: {"query": query, "sources": [{"url": "https://example.com/", "title": "Example"}], "truncated": False},
+            ))
+            threads = [Thread(target=server.serve_forever, daemon=True) for server in (admin_server, web_server)]
+            for thread in threads:
+                thread.start()
+            setting_url = f"http://127.0.0.1:{admin_server.server_port}/api/settings/dssuperagent-web-search"
+            search_url = f"http://127.0.0.1:{web_server.server_port}/internal/web/search"
+
+            def set_enabled(enabled):
+                request = Request(setting_url, data=json.dumps({"enabled": enabled}).encode(), method="PUT",
+                    headers={"Authorization": "Bearer admin-token", "Content-Type": "application/json"})
+                with urlopen(request, timeout=2) as response:
+                    return json.loads(response.read())
+
+            def search():
+                request = Request(search_url, data=json.dumps({"query": "latest release"}).encode(), method="POST",
+                    headers={"Content-Type": "application/json", "X-Company-Agent-Bridge-Key": "bridge-secret"})
+                with urlopen(request, timeout=2) as response:
+                    return json.loads(response.read())
+
+            try:
+                with self.assertRaises(HTTPError) as error:
+                    search()
+                self.assertEqual(error.exception.code, 403)
+                self.assertTrue(set_enabled(True)["enabled"])
+                self.assertEqual(search()["sources"][0]["url"], "https://example.com/")
+                self.assertFalse(set_enabled(False)["enabled"])
+                with self.assertRaises(HTTPError) as error:
+                    search()
+                self.assertEqual(error.exception.code, 403)
+            finally:
+                for server in (admin_server, web_server):
+                    server.shutdown()
+                    server.server_close()
+                for thread in threads:
+                    thread.join(timeout=2)
                 plane.close()
 
 
