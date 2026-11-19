@@ -18,10 +18,12 @@
 ## 职责与权限
 
 - DSSuperAgent 负责静默判断和提出工作意图，不直接创建 Ticket、执行工作或发送消息。
+- Company Agent 事件必须经 orchestrator_eval / orchestrator_eval_decide 形成带有 assistant_intent 的结构化决定；禁止用 orchestrator_route 直接忽略事件，否则 Company Agent 无法识别处理意图，会将运行标记为失败。此约束只在 DSSuperAgent 项目适配层，不修改 DSH 本体。
 - Company Agent 负责持久化工作状态、检查能力和权限、调用 DSH、保存执行结果及发布建议。
 - 事件中的能力清单只说明本次事件允许讨论哪些执行能力，不构成授权。模型提出的能力必须同时存在于事件和后端配置中。
 - 默认策略不自动执行。开发验收可通过命令行显式允许 `dsh.task`；其他工作走已有审批流程，DSH Dispatcher 仍会再次校验。
 - Step 4 只保存 `suppress`、`private_nudge`、`group_update` 或 `urgent_escalation` 建议，不创建 Outbox，不向任何群或个人发送消息。
+- DSSuperAgent 主会话不使用联网工具。当前事件要求最新、实时、外部或网页信息时，必须形成带 `dsh.task` 步骤的 `propose_work`，由 worker 使用受控联网工具完成；历史上下文中的“不能联网”不能覆盖当前请求。QQ 需要回复时应建议 `group_update`。
 - 当前 DSSuperAgent HTTP 地址必须是本机 loopback 地址，不传递 GitHub 凭据或仓库身份。
 
 ## DSSuperAgent 桥接补丁

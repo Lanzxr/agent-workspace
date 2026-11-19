@@ -59,9 +59,9 @@ docker compose --env-file <私有运行目录>/anythingllm.env up -d
 
 ### WSL2 Docker 出站网络
 
-AnythingLLM 需要向外部嵌入 API 发起 HTTPS 请求，也需要从配置的 OCR CDN 下载语言包。实际故障中，AnythingLLM 容器对 `api.siliconflow.cn:443` 的连接超时；虽然 systemd 防火墙服务显示运行过，当前网桥在 Docker 的 `DOCKER-FORWARD` 链里却没有对应放行规则。旧脚本把规则写进 Docker 自己管理的链，规则可能在网络重建后消失。只看服务状态不足以证明容器能出站。
+AnythingLLM 需要向外部嵌入 API 发起 HTTPS 请求，也需要从配置的 OCR CDN 下载语言包；受控联网搜索使用独立的 SearXNG Docker 网桥，也需要对外发起 HTTPS 搜索请求。实际故障中，AnythingLLM 容器对 `api.siliconflow.cn:443` 的连接超时；虽然 systemd 防火墙服务显示运行过，旧网桥却没有对应的出站放行规则。旧脚本把规则写进 Docker 自己管理的链，网络重建后规则可能消失。只看服务状态不足以证明容器能出站。
 
-仓库提供 `deploy/anythingllm/apply-egress-firewall.sh`，规则写入 Docker 保留给用户管理的 `DOCKER-USER` 链，只允许 AnythingLLM 网桥向 WSL 默认外网网卡建立 TCP 443 连接，并允许已建立连接的回包。该规则不会开放新的主机入站端口，也不会放行容器到其他 Docker 网段的转发。Compose 将网桥固定为 `br-agent-kb`，让重建容器或默认网络后规则仍匹配。首次部署时，在 WSL 的 Ubuntu-24.04 中、仓库目录下安装并启用规则：
+仓库提供 `deploy/anythingllm/apply-egress-firewall.sh`，规则写入 Docker 保留给用户管理的 `DOCKER-USER` 链，只允许 AnythingLLM 和受控搜索网桥向 WSL 默认外网网卡建立 TCP 443 连接，并允许已建立连接的回包。SearXNG 使用固定网桥 `br-agent-search`，与 AnythingLLM 的 `br-agent-kb` 规则分别匹配。该规则不会开放新的主机入站端口，也不会放行容器到其他 Docker 网段的转发。Compose 将网桥固定为 `br-agent-kb`，让重建容器或默认网络后规则仍匹配。首次部署时，在 WSL 的 Ubuntu-24.04 中、仓库目录下安装并启用规则：
 
 ```bash
 sudo install -m 0755 deploy/anythingllm/apply-egress-firewall.sh /usr/local/sbin/company-agent-anythingllm-egress

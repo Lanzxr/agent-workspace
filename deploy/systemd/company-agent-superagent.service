@@ -1,0 +1,19 @@
+[Unit]
+Description=DSSuperAgent (official DSH runtime with current Company Agent bundle)
+Requires=company-agent@admin.service
+After=network-online.target docker.service company-agent@admin.service
+
+[Service]
+Type=simple
+User=lan_z
+Group=lan_z
+Environment=HOME=/home/lan_z
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/lan_z/company-agent-deploy/current
+ExecStart=/home/lan_z/.local/share/company-agent/venv/bin/python /home/lan_z/company-agent-deploy/current/run-release.py superagent
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,12 +1,12 @@
 [Unit]
-Description=Allow AnythingLLM Docker network outbound traffic
+Description=Allow approved Company Agent Docker networks outbound HTTPS
 Requires=docker.service
 After=docker.service
 PartOf=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/company-agent-anythingllm-egress
+ExecStart=/usr/local/sbin/company-agent-anythingllm-egress anythingllm_default company-agent-search-network
 RemainAfterExit=yes
 
 [Install]
