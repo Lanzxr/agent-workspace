@@ -11,7 +11,27 @@
 | 用户身份 | 管理内部用户及 QQ/其他平台外部 ID 绑定；群级绑定优先，全局 `*` 绑定作为回退。 | `app/identity.py` |
 | 定时任务 | 将用户本地时间换算为 UTC，持久化来源事件、工作项、续接提示、上下文和回复目标；重启后恢复未完成唤醒。 | `app/scheduler.py`、`app/scheduled_resume.py` |
 | 联网检索开关 | 控制库分别保存 DSSuperAgent 和 DSH 的联网权限。DSSuperAgent 每次搜索/读网页前经过受控网关检查；DSH 仍在创建执行配置时读取自己的开关，操作官方 `tool-web` 插件，不改 DSH 核心。 | `app/web_gate.py`、`app/admin_api.py`、`app/runtime_config.py`、`app/dsh.py` |
-| 中控台 | 提供本地认证网页/API，管理用户绑定、日程和联网设置，并查看状态、空间用量、审计记录及指定执行的 stdout/stderr。 | `app/admin_api.py`、`web/index.html` |
+| 中控台 | 提供本地认证网页/API，默认按会话显示用户和 Agent 消息；点击消息后查看 DSSuperAgent、Work、DSH Execution、Workspace 和 Outbox 的处理时间线，同时管理用户绑定、日程和联网设置。 | `app/admin_api.py`、`app/observability.py`、`web/index.html` |
+
+## 对话视图与消息追踪
+
+中控台打开后的默认页面是“对话”。它只展示会话、消息正文、附件名称、时间和简短处理状态，不在消息列表中直接展开内部 ID 或完整审计日志。
+
+点击一条消息后，详情面板通过同一个 `event_id` 关联以下对象：
+
+```text
+QQ 消息 → Company Agent 事件 → DSSuperAgent 运行 → Work → DSH Execution → Outbox 回复
+```
+
+详情面板显示处理时间线、当前状态、关联的 Work/Execution/Workspace 标识和最近的失败阶段。`event_id` 同时作为这条消息的内部追踪 ID，因此不需要改变 DSH 本体或向运行环境写入额外追踪字段。
+
+管理 API：
+
+- `GET /api/conversations?limit=50`：返回按会话分组的消息视图。
+- `GET /api/message-trace?event_id=...`：返回一条消息的处理时间线和关联对象。
+- `GET /api/status`：除服务概况外，返回 DSSuperAgent 运行统计、DSH 执行统计和当前排队/执行中的 DSH 任务。
+
+控制台每 5 秒刷新一次消息和运行状态；只有点击消息时才请求详情，不会把高密度日志默认展示给日常使用者。
 
 ## 附件规则
 
@@ -42,7 +62,7 @@ py -m app --data-dir "$HOME/.local/share/company-agent" admin-serve --config "$H
 
 默认关闭，分成两个开关：
 
-- `DSSuperAgent 联网检索`：控制 `orchestrator_web_search` 和 `orchestrator_web_fetch`。每次调用先请求 Company Agent 的 `/internal/web/authorize`，开关关闭时返回 403，开关打开后才调用 DSH 官方 `ctx.web` 能力。切换后不需要重启 DSSuperAgent，下一次调用立即使用新状态。
+- `DSSuperAgent worker 联网检索`：主会话没有联网工具；需要实时信息时派给 worker。worker 仅使用 `orchestrator_web_search` 和 `orchestrator_web_fetch`，Company Agent 每次调用都检查控制台开关，搜索经本机 SearXNG，网页读取经授权后由 DSH fetch 执行。切换后立即生效，不需重启。独立 Company Agent DSH 执行任务的联网权限单独控制。详细配置见 `docs/09-controlled-web-search.md`。
 - `DSH 任务联网`：控制 Company Agent 启动的 DSH 执行进程是否加载官方 `tool-web`。它只影响新建的 DSH 执行，已经运行的进程不热更新。
 
 这样可以只允许 DSSuperAgent 查资料，也可以只允许获准的 DSH 任务联网。两层权限互不替代，资料库检索也不受这两个开关影响。
