@@ -7,9 +7,24 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Mapping
 from urllib.parse import urlsplit
 
 from .mcp_registry import McpServerSpec, load_mcp_secrets, parse_mcp_servers_json
+from .ports import DEFAULT_FORGE_MCP_PORT, resolve_port_settings
+
+
+def parse_forge_mcp_settings(values: Mapping[str, str]) -> tuple[bool, str, int, str]:
+    """Parse shared Tool Forge loopback MCP server settings with strict validation."""
+    enabled = str(values.get("COMPANY_AGENT_FORGE_MCP_ENABLED") or "true").strip().lower() in {"1", "true", "yes", "on"}
+    ports = resolve_port_settings(values)
+    host = ports.forge_mcp_host
+    if host not in {"127.0.0.1", "localhost"}:
+        raise ValueError("COMPANY_AGENT_FORGE_MCP_HOST must bind to 127.0.0.1 or localhost")
+    owner = str(values.get("COMPANY_AGENT_FORGE_MCP_OWNER") or "admin").strip().lower() or "admin"
+    if owner not in {"admin", "qq"}:
+        raise ValueError("COMPANY_AGENT_FORGE_MCP_OWNER must be admin or qq")
+    return enabled, host, ports.forge_mcp_port, owner
 
 DSH_VERSION = "0.2.2-rc.1"
 POLICY_VERSION = "workspace-dev-v1"
@@ -78,20 +93,27 @@ class RuntimeConfig:
     web_gate_api_key: str = field(default="", repr=False)
     mcp_servers: tuple[McpServerSpec, ...] = ()
     mcp_secrets: dict[str, str] = field(default_factory=dict, repr=False)
+    forge_mcp_enabled: bool = True
+    forge_mcp_host: str = "127.0.0.1"
+    forge_mcp_port: int = DEFAULT_FORGE_MCP_PORT
+    forge_mcp_owner: str = "admin"
 
     @staticmethod
     def _parse_web_gate_search_url(values: dict[str, str]) -> str | None:
-        raw_url = (values.get("COMPANY_AGENT_WEB_GATE_URL") or "").strip()
-        if raw_url:
-            parsed = urlsplit(raw_url)
-            if parsed.scheme in {"http", "https"} and parsed.netloc and not parsed.username and not parsed.password:
-                return f"{parsed.scheme}://{parsed.netloc}/internal/web/dsh-search"
-        raw_port = (values.get("COMPANY_AGENT_WEB_GATE_PORT") or "").strip()
-        if raw_port.isdigit() and 1 <= int(raw_port) <= 65535:
-            host = (values.get("COMPANY_AGENT_WEB_GATE_HOST") or "127.0.0.1").strip()
-            connect_host = "127.0.0.1" if host in {"", "0.0.0.0", "::"} else host
-            return f"http://{connect_host}:{raw_port}/internal/web/dsh-search"
-        return None
+        has_gate_cfg = any(
+            (values.get(key) or "").strip()
+            for key in (
+                "COMPANY_AGENT_WEB_GATE_URL",
+                "COMPANY_AGENT_WEB_GATE_PORT",
+                "COMPANY_AGENT_WEB_GATE_HOST",
+                "COMPANY_AGENT_WEB_SEARCH_URL",
+                "COMPANY_AGENT_SEARCH_PORT",
+                "COMPANY_AGENT_PORT_BASE",
+            )
+        )
+        if not has_gate_cfg:
+            return None
+        return resolve_port_settings(values).web_gate_dsh_search_url
 
     @classmethod
     def load(cls, path: Path) -> "RuntimeConfig":
@@ -137,6 +159,7 @@ class RuntimeConfig:
             raise ValueError("web gate API key must be a single-line value")
         mcp_servers = parse_mcp_servers_json(values.get("COMPANY_AGENT_MCP_SERVERS", ""))
         mcp_secrets = load_mcp_secrets(values, mcp_servers)
+        forge_enabled, forge_host, forge_port, forge_owner = parse_forge_mcp_settings(values)
         return cls(
             url, model, key, command, path.expanduser().resolve(), web_enabled,
             dsh_default_timeout_seconds=default_timeout,
@@ -148,6 +171,10 @@ class RuntimeConfig:
             web_gate_api_key=web_gate_api_key,
             mcp_servers=mcp_servers,
             mcp_secrets=mcp_secrets,
+            forge_mcp_enabled=forge_enabled,
+            forge_mcp_host=forge_host,
+            forge_mcp_port=forge_port,
+            forge_mcp_owner=forge_owner,
         )
 
     @staticmethod

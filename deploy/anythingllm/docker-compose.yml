@@ -46,7 +46,7 @@ services:
       HTTPS_PROXY: ${ANYTHINGLLM_HTTPS_PROXY:-}
       NO_PROXY: ${ANYTHINGLLM_NO_PROXY:-localhost,127.0.0.1,::1}
     ports:
-      - 127.0.0.1:3001:3001
+      - 127.0.0.1:${COMPANY_AGENT_ANYTHINGLLM_PORT:-28771}:3001
     volumes:
       - anythingllm_storage:/app/server/storage
 

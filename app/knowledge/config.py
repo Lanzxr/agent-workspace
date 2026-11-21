@@ -5,6 +5,7 @@ from ipaddress import IPv4Address, ip_address
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from ..ports import DEFAULT_KNOWLEDGE_API_PORT, resolve_port_settings
 from ..runtime_config import RuntimeConfig
 
 MAX_KNOWLEDGE_FILE_BYTES = 500 * 1024 * 1024
@@ -18,7 +19,7 @@ class KnowledgeSettings:
     admin_user_ids: frozenset[str] = frozenset()
     max_file_bytes: int = MAX_KNOWLEDGE_FILE_BYTES
     parse_timeout_seconds: float = 180
-    query_api_port: int = 8766
+    query_api_port: int = DEFAULT_KNOWLEDGE_API_PORT
     query_api_host: str = "127.0.0.1"
     query_api_key: str = field(default="", repr=False)
     workspace_prefix: str = "company-agent"
@@ -59,9 +60,17 @@ class KnowledgeSettings:
                   if values.get(key, "").strip()]
         if legacy:
             raise ValueError("legacy RAGFlow configuration is no longer supported; migrate to AnythingLLM settings")
+        ports = resolve_port_settings(values)
+        effective_values = dict(values)
+        if not (effective_values.get("ANYTHINGLLM_BASE_URL") or "").strip() and (
+            (effective_values.get("COMPANY_AGENT_ANYTHINGLLM_PORT") or "").strip()
+            or (effective_values.get("COMPANY_AGENT_PORT_BASE") or "").strip()
+        ):
+            effective_values["ANYTHINGLLM_BASE_URL"] = ports.anythingllm_url
+
         required = ("ANYTHINGLLM_BASE_URL", "ANYTHINGLLM_API_KEY",
                     "COMPANY_AGENT_KNOWLEDGE_GRANT_SECRET")
-        supplied = [bool(values.get(key, "").strip()) for key in required]
+        supplied = [bool(effective_values.get(key, "").strip()) for key in required]
         if not any(supplied):
             return None
         if not all(supplied):
@@ -70,13 +79,14 @@ class KnowledgeSettings:
         try:
             max_bytes = int(values.get("COMPANY_AGENT_KNOWLEDGE_MAX_FILE_BYTES", str(MAX_KNOWLEDGE_FILE_BYTES)))
             parse_timeout = float(values.get("ANYTHINGLLM_REQUEST_TIMEOUT_SECONDS", "180"))
-            query_api_port = int(values.get("COMPANY_AGENT_KNOWLEDGE_API_PORT", "8766"))
-            query_api_host = values.get("COMPANY_AGENT_KNOWLEDGE_API_HOST", "127.0.0.1").strip()
+            query_api_port = ports.knowledge_api_port
+            query_api_host = ports.knowledge_api_host
         except ValueError as error:
             raise ValueError("knowledge file limit, parse timeout, and API port must be numeric") from error
         admins = frozenset(item.strip() for item in values.get("COMPANY_AGENT_KNOWLEDGE_ADMIN_USER_IDS", "").split(",")
                            if item.strip())
-        return cls(values["ANYTHINGLLM_BASE_URL"].strip().rstrip("/"), values["ANYTHINGLLM_API_KEY"].strip(),
-                   values["COMPANY_AGENT_KNOWLEDGE_GRANT_SECRET"], admins, max_bytes, parse_timeout,
+        return cls(effective_values["ANYTHINGLLM_BASE_URL"].strip().rstrip("/"),
+                   effective_values["ANYTHINGLLM_API_KEY"].strip(),
+                   effective_values["COMPANY_AGENT_KNOWLEDGE_GRANT_SECRET"], admins, max_bytes, parse_timeout,
                    query_api_port, query_api_host, values.get("COMPANY_AGENT_KNOWLEDGE_API_KEY", ""),
                    values.get("COMPANY_AGENT_KNOWLEDGE_WORKSPACE_PREFIX", "company-agent").strip())

@@ -1,6 +1,7 @@
-param(
+﻿param(
     [string]$Source = 'D:\work\AI工作文件夹\内部agent\company-agent-runtime\runtime.env',
-    [string]$Distribution = 'Ubuntu-24.04'
+    [string]$Distribution = 'Ubuntu-24.04',
+    [string]$WslUser = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,7 +13,11 @@ if ($resolvedSource -notmatch '^([A-Za-z]):[\\/](.*)$') {
     throw 'Source must be a local Windows drive path.'
 }
 $linuxSource = '/mnt/' + $Matches[1].ToLowerInvariant() + '/' + $Matches[2].Replace('\', '/')
-& wsl.exe -d $Distribution -- python3 -c @'
+$wslArgs = @('-d', $Distribution)
+if ($WslUser) {
+    $wslArgs += @('-u', $WslUser)
+}
+$script = @'
 import os
 import pathlib
 import sys
@@ -33,7 +38,9 @@ with tempfile.NamedTemporaryFile(dir=directory, delete=False) as stream:
     os.fsync(stream.fileno())
 temporary.replace(destination)
 print('RUNTIME_CONFIG_SYNCED: ' + str(destination))
-'@ $linuxSource
+'@
+$wslArgs += @('--', 'python3', '-c', $script, $linuxSource)
+& wsl.exe @wslArgs
 if ($LASTEXITCODE -ne 0) {
     throw 'WSL configuration synchronization failed.'
 }

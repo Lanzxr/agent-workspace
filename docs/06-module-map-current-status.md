@@ -71,7 +71,7 @@ Company Agent 项目
 | Identity Registry | 已支持内部用户创建、平台 ID 绑定/解绑、群级及全局解析；真实 QQ 账号绑定待部署操作验收。 | `app/identity.py`、`app/store.py` |
 | Attachment Ingestor | 支持稳定附件 ID、原件先保存、状态恢复和后台 OCR/AnythingLLM 入库；真实 QQ 下载/解析仍需部署验收。 | `app/attachments.py`、`docs/08-management-modules.md` |
 | Scheduler / Resume Handler | UTC 持久化、时区转换、到期轮询、失败重试和服务重启恢复已接线；唤醒交给 DSSuperAgent 判断，不自动授权执行。 | `app/scheduler.py`、`app/scheduled_resume.py` |
-| Tools / Data Sources | `dsh.task`、Workspace 内 Shell/Python 与 `shared-tools` 组件库已实现；DSH 官方 `tool-web` 与受控 MCP 服务挂载（按 `admin`/`internal`/`common` 会话层级过滤并经 `controlled-mcp.mjs` 桥接 `@deepseek-ai/dsh-mcp-client`，`bash` 沙箱保持断网并 `--unsetenv` 擦除密钥）均已接线，控制台可查看与启停。真实外部 MCP 业务接口待按具体后端挂载验收。 | `app/dsh.py`、`app/mcp_registry.py`、`app/dsh_plugins/controlled-mcp.mjs`、`app/runtime_config.py` |
+| Tools / Data Sources | `dsh.task`、Workspace 内 Shell/Python 与 `shared-tools` 组件库已实现；DSH 官方 `tool-web` 与受控 MCP 服务挂载（按 `admin`/`internal`/`common` 会话层级过滤并经 `controlled-mcp.mjs` 桥接 `@deepseek-ai/dsh-mcp-client`，`bash` 沙箱保持断网并 `--unsetenv` 擦除密钥），以及 **Tool Forge（`tool_forge.py` + `tool_forge_mcp.py`）动态工具工坊**（管理员 QQ 私聊试跑/生成 `http_api` / `python_plugin` / `shared_script`，域名白名单 + 0600 凭据隔离 + 提案审批后自动热挂载到 `forge_admin` / `forge_internal` / `forge_common`）均已接线，控制台与 QQ 私聊均可维护。 | `app/dsh.py`、`app/mcp_registry.py`、`app/tool_forge.py`、`app/tool_forge_mcp.py`、`app/dsh_plugins/controlled-mcp.mjs`、`app/runtime_config.py` |
 | Admin Console | 已提供 loopback 认证控制台及用户、绑定、日程、联网设置、状态、用量和审计 API。 | `app/admin_api.py`、`web/index.html` |
 | Outbox 投递 | 已接入 QQ 发送 API、白名单检查、失败重试与人工解决未知发送状态；真实群发送未验收。 | `app/control_plane.py`、`app/qq_channel.py` |
 

@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .dsh_session import DshSessionMonitor, resolve_node_executable
 from .execution_state import private_directory, write_private_json
@@ -230,7 +230,8 @@ class DshAdapter:
     def __init__(self, config: RuntimeConfig, manager: WorkspaceManager, runtime_directory: Path,
                  *, bubblewrap_executable: Path | None = None,
                  web_search_enabled: Callable[[], bool] | None = None,
-                 mcp_servers_provider: Callable[[], Sequence[McpServerSpec]] | None = None) -> None:
+                 mcp_servers_provider: Callable[[], Sequence[McpServerSpec]] | None = None,
+                 mcp_secrets_provider: Callable[[], Mapping[str, str]] | None = None) -> None:
         self.config = config
         self.manager = manager
         self.runtime_directory = private_directory(runtime_directory.resolve())
@@ -238,10 +239,27 @@ class DshAdapter:
         self.bubblewrap_executable = bubblewrap_executable
         self.web_search_enabled = web_search_enabled
         self.mcp_servers_provider = mcp_servers_provider
+        self.mcp_secrets_provider = mcp_secrets_provider
         if not manager.base_directory.is_relative_to(self.private_data_directory):
             raise ValueError("Workspace and DSH runtime data must share one private data directory")
         if self.runtime_directory.is_relative_to(manager.base_directory):
             raise ValueError("DSH configuration and receipts must be outside Agent workspaces")
+
+    def all_mcp_secrets(self) -> dict[str, str]:
+        merged = dict(self.config.mcp_secrets)
+        if self.mcp_secrets_provider is not None:
+            for k, v in (self.mcp_secrets_provider() or {}).items():
+                val = str(v or "").strip()
+                if val:
+                    merged[str(k)] = val
+        return merged
+
+    def _redact(self, text: str) -> str:
+        clean = self.config.redact(text)
+        for secret in sorted(self.all_mcp_secrets().values(), key=len, reverse=True):
+            if secret:
+                clean = clean.replace(secret, "[REDACTED]")
+        return clean
 
     def all_mcp_servers(self) -> tuple[McpServerSpec, ...]:
         """Return currently configured MCP servers (from live provider or baseline RuntimeConfig)."""
@@ -485,7 +503,7 @@ class DshAdapter:
             "execution_contract": execution_contract,
         }
         trace_name = f"dsh/{request.execution_id}.events.jsonl"
-        live_trace = _LiveDshTrace(self.manager, workspace.workspace_id, trace_name, workspace.root, self.config.redact)
+        live_trace = _LiveDshTrace(self.manager, workspace.workspace_id, trace_name, workspace.root, self._redact)
         effective_compaction_timeout = (
             task.compaction_timeout_seconds
             if task.compaction_timeout_explicit
@@ -526,7 +544,7 @@ class DshAdapter:
             if remaining_for_retry >= 1.0:
                 session_resumed = False
                 live_trace = _LiveDshTrace(self.manager, workspace.workspace_id, trace_name,
-                                           workspace.root, self.config.redact)
+                                           workspace.root, self._redact)
                 session_monitor = DshSessionMonitor(
                     runtime_home,
                     live_trace,
@@ -752,7 +770,7 @@ class DshAdapter:
             "timed_out" if category in {"timeout", "idle_timeout", "compaction_timeout", "soft_timeout"} else "failed"
         )
         return ExecutionResult(
-            request.execution_id, status, self.config.redact(output),
+            request.execution_id, status, self._redact(output),
             [f"logs/{trace_name}"],
             [entry["path"] for entry in manifest], None if category is None else f"DSH execution failed: {category}", metadata,
         )
@@ -926,14 +944,15 @@ class DshAdapter:
             if authorized_mcp_servers is not None
             else self.authorized_mcp_servers(workspace_tier)
         )
+        merged_secrets = self.all_mcp_secrets()
         allowed_secret_vars: set[str] = set()
         for spec in active_mcp:
             for var_name in spec.referenced_host_env_vars():
                 allowed_secret_vars.add(var_name)
-                secret_val = self.config.mcp_secrets.get(var_name) or os.environ.get(var_name, "").strip()
+                secret_val = merged_secrets.get(var_name) or os.environ.get(var_name, "").strip()
                 if secret_val:
                     environment[var_name] = secret_val
-        for var_name in all_mcp_secret_env_names(self.all_mcp_servers(), self.config.mcp_secrets):
+        for var_name in all_mcp_secret_env_names(self.all_mcp_servers(), merged_secrets):
             if var_name not in allowed_secret_vars:
                 environment.pop(var_name, None)
         shared_root = self.private_data_directory / "shared-tools"
@@ -965,7 +984,7 @@ class DshAdapter:
             "--unsetenv", "COMPANY_AGENT_MODEL_API_KEY",
             "--unsetenv", "COMPANY_AGENT_WEB_GATE_API_KEY",
         ]
-        for var_name in all_mcp_secret_env_names(self.all_mcp_servers(), self.config.mcp_secrets):
+        for var_name in all_mcp_secret_env_names(self.all_mcp_servers(), self.all_mcp_secrets()):
             if var_name not in {"COMPANY_AGENT_MODEL_API_KEY", "COMPANY_AGENT_WEB_GATE_API_KEY"}:
                 insert.extend(["--unsetenv", var_name])
         for root in masked_roots:

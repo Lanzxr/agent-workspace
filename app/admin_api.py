@@ -23,10 +23,12 @@ from .mcp_registry import (
     merge_mcp_servers,
 )
 from .observability import audit_label, list_conversations, trace_for_event
+from .ports import assert_port_available
 from .qq_channel import DEFAULT_AMBIENT_COOLDOWN_SECONDS, DEFAULT_BOT_ALIASES
 from .scheduler import ScheduleService
 from .scheduler import SchedulerWorker
 from .shared_tools import SharedToolsManager
+from .tool_forge import ForgeSecretsVault, ToolForgeError, ToolForgeSecurityError, ToolForgeService
 from .workspace import WorkspaceError, WorkspaceManager
 from .workspace_retention import (
     MAX_WORKSPACE_RETENTION_DAYS,
@@ -44,7 +46,119 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str,
                  knowledge_service: KnowledgeService | None = None,
                  qq_app_id: str | None = None,
                  mcp_runtime_servers: tuple[McpServerSpec, ...] = (),
-                 mcp_secrets: Mapping[str, str] | None = None):
+                 mcp_secrets: Mapping[str, str] | None = None,
+                 tool_forge: ToolForgeService | None = None,
+                 forge_secrets_vault: ForgeSecretsVault | None = None):
+    shared_tools_mgr = SharedToolsManager(data_directory / "shared-tools")
+    forge_vault = forge_secrets_vault or ForgeSecretsVault(data_directory / "forge-secrets.json")
+    forge_service = tool_forge or ToolForgeService(plane, secrets_vault=forge_vault, shared_tools=shared_tools_mgr)
+
+    def _route_forge(method: str, path: str, query: dict[str, list[str]], body_fn) -> tuple[int, Any] | None:
+        if path == "/api/forge/summary" and method == "GET":
+            return 200, forge_service.summary()
+        if path == "/api/forge/domains" and method == "GET":
+            return 200, {"domains": forge_service.list_domains()}
+        if path == "/api/forge/domains" and method == "POST":
+            body = body_fn()
+            return 201, forge_service.add_domain(
+                str(body.get("domain") or ""),
+                allow_subdomains=bool(body.get("allow_subdomains", False)),
+                note=str(body.get("note") or ""),
+                created_by="console",
+            )
+        if path == "/api/forge/domains" and method == "DELETE":
+            domain = (query.get("domain") or [""])[0].strip()
+            return 200, {"deleted": forge_service.remove_domain(domain, actor="console")}
+        if path == "/api/forge/secrets" and method == "GET":
+            return 200, {"secrets": forge_service.list_secrets_metadata()}
+        if path == "/api/forge/secrets" and method == "POST":
+            body = body_fn()
+            return 201, forge_service.set_secret(
+                str(body.get("name") or ""),
+                str(body.get("value") or ""),
+                actor="console",
+            )
+        if path == "/api/forge/secrets" and method == "DELETE":
+            name = (query.get("name") or [""])[0].strip()
+            return 200, {"deleted": forge_service.delete_secret(name, actor="console")}
+        if path == "/api/forge/tools" and method == "GET":
+            return 200, {"tools": forge_service.list_tools()}
+        if path == "/api/forge/tool" and method == "GET":
+            tool_id = (query.get("tool_id") or [""])[0].strip()
+            ver_raw = (query.get("version") or [""])[0].strip()
+            return 200, forge_service.get_tool(tool_id, version=int(ver_raw) if ver_raw else None)
+        if path == "/api/forge/tools/draft" and method == "POST":
+            body = body_fn()
+            return 201, forge_service.draft_tool(
+                tool_id=str(body.get("tool_id") or ""),
+                kind=str(body.get("kind") or ""),
+                description=str(body.get("description") or ""),
+                when_to_use=str(body.get("when_to_use") or ""),
+                when_not_to_use=str(body.get("when_not_to_use") or ""),
+                operation_type=str(body.get("operation_type") or "read"),
+                target_visibility=str(body.get("target_visibility") or "internal"),
+                input_schema=body.get("input_schema"),
+                http_spec=body.get("http_spec"),
+                python_code=str(body.get("python_code") or ""),
+                script_name=str(body.get("script_name") or ""),
+                script_content=str(body.get("script_content") or ""),
+                allowed_domains=body.get("allowed_domains"),
+                default_test_input=body.get("default_test_input"),
+                created_by="console",
+            )
+        if path == "/api/forge/tools/test" and method == "POST":
+            body = body_fn()
+            ver = body.get("version")
+            return 200, forge_service.test_tool(
+                str(body.get("tool_id") or ""),
+                version=int(ver) if ver is not None else None,
+                arguments=body.get("arguments"),
+            )
+        if path == "/api/forge/tools/submit" and method == "POST":
+            body = body_fn()
+            ver = body.get("version")
+            return 201, forge_service.submit_release(
+                str(body.get("tool_id") or ""),
+                version=int(ver) if ver is not None else None,
+                target_visibility=body.get("target_visibility"),
+                requested_by="console",
+                summary=str(body.get("summary") or ""),
+            )
+        if path == "/api/forge/tools/enable" and method == "PUT":
+            body = body_fn()
+            return 200, forge_service.set_tool_enabled(
+                str(body.get("tool_id") or ""),
+                enabled=bool(body.get("enabled")),
+                actor="console",
+            )
+        if path == "/api/forge/tools/rollback" and method == "POST":
+            body = body_fn()
+            ver = body.get("target_version")
+            return 200, forge_service.rollback_tool(
+                str(body.get("tool_id") or ""),
+                target_version=int(ver) if ver is not None else None,
+                actor="console",
+            )
+        if path == "/api/forge/proposals" and method == "GET":
+            status = (query.get("status") or ["all"])[0].strip() or "all"
+            limit_raw = (query.get("limit") or ["100"])[0].strip()
+            return 200, {"proposals": forge_service.list_proposals(status=status, limit=int(limit_raw))}
+        if path == "/api/forge/proposals/approve" and method == "POST":
+            body = body_fn()
+            return 200, forge_service.approve_proposal(
+                str(body.get("proposal_id") or ""),
+                decided_by="console",
+                is_admin=True,
+            )
+        if path == "/api/forge/proposals/reject" and method == "POST":
+            body = body_fn()
+            return 200, forge_service.reject_proposal(
+                str(body.get("proposal_id") or ""),
+                decided_by="console",
+                is_admin=True,
+                reason=str(body.get("reason") or ""),
+            )
+        return None
     class Handler(BaseHTTPRequestHandler):
         server_version = "CompanyAgentConsole/1.0"
 
@@ -527,6 +641,11 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str,
                 )
                 plane.record_external_audit("workspace_files_pruned", summary)
                 return self._send(200, summary)
+            if path.startswith("/api/forge/"):
+                forge_query = parse_qs(urlsplit(self.path).query)
+                res = _route_forge(method, path, forge_query, self._body)
+                if res is not None:
+                    return self._send(res[0], res[1])
             return self._send(404, {"error": "not found"})
 
         def do_GET(self): self._safe_route("GET")
@@ -537,11 +656,13 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str,
         def _safe_route(self, method):
             try:
                 self._route(method)
+            except ToolForgeSecurityError as error:
+                self._send(403, {"error": str(error)[:400]})
             except (FileNotFoundError, NotFound) as error:
                 self._send(404, {"error": str(error)[:300]})
             except RuntimeError as error:
                 self._send(502, {"error": str(error)[:500]})
-            except (ValueError, KeyError, TypeError, json.JSONDecodeError, sqlite3.IntegrityError,
+            except (ToolForgeError, ValueError, KeyError, TypeError, json.JSONDecodeError, sqlite3.IntegrityError,
                     WorkspaceError) as error:
                 self._send(400, {"error": str(error)[:500]})
 
@@ -553,9 +674,12 @@ def serve(plane: ControlPlane, data_directory: Path, host: str, port: int, token
           knowledge_service: KnowledgeService | None = None,
           qq_app_id: str | None = None,
           mcp_runtime_servers: tuple[McpServerSpec, ...] = (),
-          mcp_secrets: Mapping[str, str] | None = None) -> None:
+          mcp_secrets: Mapping[str, str] | None = None,
+          tool_forge: ToolForgeService | None = None,
+          forge_secrets_vault: ForgeSecretsVault | None = None) -> None:
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("admin console can only bind to loopback; use an authenticated reverse proxy for remote access")
+    assert_port_available(host, port, service_name="Admin Console", env_var="COMPANY_AGENT_ADMIN_PORT")
     server = HTTPServer(
         (host, port),
         make_handler(
@@ -563,6 +687,8 @@ def serve(plane: ControlPlane, data_directory: Path, host: str, port: int, token
             qq_app_id=qq_app_id,
             mcp_runtime_servers=mcp_runtime_servers,
             mcp_secrets=mcp_secrets,
+            tool_forge=tool_forge,
+            forge_secrets_vault=forge_secrets_vault,
         ),
     )
     stop = threading.Event()

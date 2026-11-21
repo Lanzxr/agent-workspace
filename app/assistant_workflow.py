@@ -17,6 +17,7 @@ from .mcp_registry import McpServerSpec
 from .models import AssistantRun, Event, ExecutionResult, PlanStep, WorkItem, WorkPlan
 from .reply_contract import deliverable_files_markers, final_reply_markers
 from .shared_tools import SharedToolsManager
+from .tool_forge import ToolForgeService
 from .workspace import WorkspaceManager
 from .workspace_retention import get_retention_days, summarize_recent_workspace_files
 
@@ -58,6 +59,7 @@ class DssuperAgentWorkflow:
         dispatcher: ExecutionDispatcher | None = None,
         knowledge_service: KnowledgeService | None = None,
         shared_tools: SharedToolsManager | None = None,
+        tool_forge: ToolForgeService | None = None,
         mcp_servers_provider: Callable[[], Sequence[McpServerSpec]] | None = None,
         policy: AssistantPolicy = AssistantPolicy(),
         decision_timeout: float = DEFAULT_DECISION_TIMEOUT_SECONDS,
@@ -79,6 +81,7 @@ class DssuperAgentWorkflow:
             self.shared_tools = SharedToolsManager(manager.base_directory.parent / "shared-tools")
         else:
             self.shared_tools = None
+        self.tool_forge = tool_forge
         adapter_mcp = getattr(getattr(dispatcher, "adapter", None), "all_mcp_servers", None)
         self.mcp_servers_provider = mcp_servers_provider or (adapter_mcp if callable(adapter_mcp) else None)
         self.policy = policy
@@ -347,6 +350,29 @@ class DssuperAgentWorkflow:
                 summary["sandbox_network"] = (
                     "disabled (--unshare-net; use authorized MCP tools (mcp__*), shared-tools scripts, or web_search/web_fetch)"
                 )
+        if self.tool_forge is not None:
+            if tier == "admin":
+                summary["tool_forge_enabled"] = True
+                summary["tool_forge_pending_proposals"] = len(self.tool_forge.list_proposals(status="pending", limit=20))
+            mcp_server_id = (
+                "forge_admin" if tier == "admin" else ("forge_internal" if tier == "internal" else "forge_common")
+            )
+            active_custom = self.tool_forge.list_active_tools_for_tier(tier)
+            if active_custom:
+                summary["custom_tools"] = [
+                    {
+                        "tool_id": item["tool_id"],
+                        "kind": item["kind"],
+                        "operation_type": item["operation_type"],
+                        "visibility": item["visibility"],
+                        "mcp_server": mcp_server_id,
+                        "mcp_tool": f"mcp__{mcp_server_id}__{item['tool_id']}",
+                        "description": item["description"],
+                        "when_to_use": item["when_to_use"],
+                        "when_not_to_use": item["when_not_to_use"],
+                    }
+                    for item in active_custom[:40]
+                ]
         if self.manager is not None and workspace_id:
             try:
                 retained = summarize_recent_workspace_files(

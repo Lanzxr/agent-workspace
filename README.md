@@ -22,28 +22,23 @@ Company Agent 是一个通用的公司内部自主助理平台。它观察经过
 - 全部实现不接入 Codex，也不保留第二套专业编程执行器。
 - 真实上游接口、模型和渠道必须用真实运行证据验收。模拟器只用于契约测试。
 
-## 目录
+## 目录（四大文档分类）
 
-- [领域语言](CONTEXT.md)
-- [项目边界](PROJECT_BOUNDARY.md)
-- [技术基线](PROJECT_BASELINE.md)
-- [技术决策](DECISIONS.md)
-- [架构说明](docs/01-architecture.md)
-- [上游事实核验表](docs/00-upstream-fact-sheet.md)
-- [Step 0 上游事实核验报告](docs/step0-upstream-research-agent.md)
-- [工作环境契约](contracts/agent-workspace.md)
-- [控制面契约](contracts/control-plane.md)
-- [模型 Provider Route 决策](docs/adr/0002-custom-model-provider-route.md)
-- [GitHub Source 边界决策](docs/adr/0003-github-source-is-optional.md)
-- [DSSuperAgent 适配契约](contracts/dssuperagent-adapter.md)
-- [DSH 执行契约](contracts/dsh-execution.md)
-- [Step 3 DSH 接入与验收](docs/04-step3-dsh.md)
-- [Step 4 DSSuperAgent 接入与验收](docs/05-step4-dssuperagent.md)
-- [长期资料库与 AnythingLLM 接入](docs/09-knowledge-base.md)
-- [DSSuperAgent Step 4 桥接补丁](patches/dssuperagent-company-agent-step4.patch)
-- [DSSuperAgent 资料库检索补丁](patches/dssuperagent-knowledge-bridge.patch)
-- [实施步骤](docs/02-implementation-plan.md)
-- [原始需求归档](source/README.md)
+### 一、使用手册
+- [Company Agent 使用手册](docs/user-manual.md)（角色权限分级、QQ 群/私聊全部指令、Tool Forge 对话造工具与审批、Web 控制台功能详解）
+
+### 二、部署手册
+- [Company Agent 部署手册](docs/deployment-manual.md)（WSL2 与独立 Linux 服务器/云主机部署全流程、可配置部署用户、Docker 搜索与资料库、SSH 远程安全访问、升级与回滚）
+
+### 三、导入 MCP 手册
+- [导入 MCP 与 Tool Forge 扩展手册](docs/mcp-manual.md)（能力选型、导入外部 `stdio`/`streamable-http`/`wsl-host` MCP、Tool Forge 对话锻造、密钥托管及 DSH JSON Schema 规范）
+
+### 四、技术文档
+- **项目基线与领域建模**：[领域语言](CONTEXT.md) · [项目边界](PROJECT_BOUNDARY.md) · [技术基线](PROJECT_BASELINE.md) · [技术决策](DECISIONS.md)
+- **架构设计与模块说明**：[架构说明](docs/01-architecture.md) · [实施步骤](docs/02-implementation-plan.md) · [模块状态映射](docs/06-module-map-current-status.md) · [管理能力与模块说明](docs/08-management-modules.md) · [上游事实核验表](docs/00-upstream-fact-sheet.md) · [Step 0 调研报告](docs/step0-upstream-research-agent.md)
+- **决策记录（ADR）**：[自定义模型 Provider Route](docs/adr/0002-custom-model-provider-route.md) · [GitHub Source 可选边界](docs/adr/0003-github-source-is-optional.md) · [重置说明](docs/03-reset-note.md)
+- **系统契约与补丁**：[工作环境契约](contracts/agent-workspace.md) · [控制面契约](contracts/control-plane.md) · [DSSuperAgent 适配契约](contracts/dssuperagent-adapter.md) · [DSH 执行契约](contracts/dsh-execution.md) · [DSSuperAgent Step 4 桥接补丁](patches/dssuperagent-company-agent-step4.patch) · [DSSuperAgent 资料库检索补丁](patches/dssuperagent-knowledge-bridge.patch)
+- **子系统实施与验收记录**：[Step 3 DSH 接入与验收](docs/04-step3-dsh.md) · [Step 4 DSSuperAgent 接入与验收](docs/05-step4-dssuperagent.md) · [Step 5 QQ 渠道接入](docs/07-step5-qq.md) · [受控 Web 检索](docs/09-controlled-web-search.md) · [长期资料库与 AnythingLLM 接入](docs/09-knowledge-base.md) · [原始需求归档](source/README.md)
 
 ## 长期资料库
 
