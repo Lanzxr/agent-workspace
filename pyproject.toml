@@ -18,5 +18,8 @@ company-agent = "app.__main__:main"
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+[tool.setuptools.package-data]
+"app" = ["dsh_plugins/*.mjs"]
+
 [tool.setuptools.data-files]
 "share/company-agent/web" = ["web/index.html"]

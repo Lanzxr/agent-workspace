@@ -138,7 +138,7 @@ class KnowledgeServiceTests(unittest.TestCase):
                          direct_doc["document_id"])
         with self.assertRaises(KnowledgeAccessError):
             self.service.authorize_documents(direct, [group_doc["document_id"]])
-        admin = self.event("admin-query", actor_id="administrator")
+        admin = self.event("admin-query", source_type="qq.c2c", source_id="openid-admin", actor_id="administrator")
         admin_token = self.service.issue_grant(admin)
         results = self.service.search_with_grant(admin_token, "evidence")["results"]
         self.assertEqual({item["document_id"] for item in results}, {group_doc["document_id"], direct_doc["document_id"]})
@@ -226,10 +226,102 @@ class KnowledgeServiceTests(unittest.TestCase):
         workspace = manager.get("test-workspace")
         delivery = KnowledgeDelivery(self.service, manager)
         staged = delivery.stage(event, workspace, "exec-1", [document["document_id"]])
-        staged_path = manager.validate_path(workspace.workspace_id, workspace.directory("work") / staged[0].relative_path)
+        self.assertTrue(staged[0].relative_path.startswith("work/inputs/exec-1/"))
+        staged_path = manager.validate_path(workspace.workspace_id, workspace.root / staged[0].relative_path)
         self.assertEqual(staged_path.read_text(encoding="utf-8"), "approved original")
         delivery.cleanup(workspace, "exec-1")
         self.assertFalse(staged_path.exists())
+
+    def test_three_tier_rbac_downward_compat_toggle_and_location_ceiling(self) -> None:
+        from app.identity import IdentityRegistry
+        identities = IdentityRegistry(self.store)
+        emp = identities.create_user("Employee Bob", role="employee")
+        # Create two groups: one internal, one client_group; plus a customer DM
+        identities.update_group(source_type="qq.group", source_id="internal-1", tier="internal")
+        identities.update_group(source_type="qq.group", source_id="client-1", tier="client_group")
+
+        # Employee saves internal note, client uploads client doc, customer uploads DM doc
+        internal_doc = self.service.ingest_internal_text(
+            actor_id=emp.user_id, title="pricing", text="company internal pricing table",
+        )
+        client_doc = self.ingest(self.event("c1-up", source_type="qq.group", source_id="client-1", actor_id="cust-1"),
+                                 "client.txt", "client group contract")
+        dm_doc = self.ingest(self.event("dm-up", source_type="qq.c2c", source_id="cust-dm", actor_id="cust-dm"),
+                             "dm.txt", "customer private note")
+
+        # 1. Compat ON (default): internal group & employee DM read internal + downward L1 client/DM
+        emp_dm_grant = self.service.issue_grant(self.event("emp-q", "qq.c2c", "openid-bob", emp.user_id))
+        internal_grp_grant = self.service.issue_grant(self.event("int-q", "qq.group", "internal-1", emp.user_id))
+        self.assertEqual(
+            {r["document_id"] for r in self.service.search_with_grant(emp_dm_grant, "evidence")["results"]},
+            {internal_doc["document_id"], client_doc["document_id"], dm_doc["document_id"]},
+        )
+        self.assertEqual(
+            {r["document_id"] for r in self.service.search_with_grant(internal_grp_grant, "evidence")["results"]},
+            {internal_doc["document_id"], client_doc["document_id"], dm_doc["document_id"]},
+        )
+
+        # 2. Location Ceiling: even admin/employee inside L1 client-1 CANNOT see internal or DM docs!
+        admin_in_client = self.event("adm-c1", source_type="qq.group", source_id="client-1", actor_id="administrator")
+        ceil_grant = self.service.issue_grant(admin_in_client)
+        self.assertEqual(
+            {r["document_id"] for r in self.service.search_with_grant(ceil_grant, "evidence")["results"]},
+            {client_doc["document_id"]},
+        )
+        with self.assertRaises(KnowledgeAccessError):
+            self.service.authorize_documents(admin_in_client, [internal_doc["document_id"]])
+
+        # 3. Turn Downward Compat OFF globally: L2 loses automatic L1 access!
+        with self.store.transaction() as connection:
+            connection.execute(
+                "INSERT INTO settings(setting_key,payload,updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(setting_key) DO UPDATE SET payload=excluded.payload",
+                ("downward_compatibility_enabled", json.dumps({"value": False}), "2026-11-19T00:00:00Z"),
+            )
+        self.assertEqual(
+            {r["document_id"] for r in self.service.search_with_grant(emp_dm_grant, "evidence")["results"]},
+            {internal_doc["document_id"]},
+        )
+
+        # 4. Explicit Share bridges a specific client doc back to internal (and/or internal doc to a client group!)
+        self.service.share_item(
+            target_kind="document", target_id=client_doc["document_id"],
+            target_scope_type="internal", target_scope_id="company", created_by="administrator",
+        )
+        self.assertEqual(
+            {r["document_id"] for r in self.service.search_with_grant(emp_dm_grant, "evidence")["results"]},
+            {internal_doc["document_id"], client_doc["document_id"]},
+        )
+        # Per-group override forces downward compat ON for internal-1 even while global is OFF
+        identities.update_group(source_type="qq.group", source_id="internal-1", downward_compat="on")
+        self.assertEqual(
+            {r["document_id"] for r in self.service.search_with_grant(internal_grp_grant, "evidence")["results"]},
+            {internal_doc["document_id"], client_doc["document_id"], dm_doc["document_id"]},
+        )
+
+        # 5. Admin L3 in DM retains full visibility across all documents regardless of compat switch
+        admin_dm = self.event("adm-dm", source_type="qq.c2c", source_id="openid-admin", actor_id="administrator")
+        admin_grant = self.service.issue_grant(admin_dm)
+        self.assertEqual(
+            {r["document_id"] for r in self.service.search_with_grant(admin_grant, "evidence")["results"]},
+            {internal_doc["document_id"], client_doc["document_id"], dm_doc["document_id"]},
+        )
+
+        # 6. Sensitive .env attachment metadata stays L3-admin only even with downward compat ON
+        env_event = self.event("env-att-up", source_type="qq.group", source_id="client-1", actor_id="cust-1")
+        with self.store.transaction() as connection:
+            connection.execute(
+                "INSERT INTO attachments(attachment_id,event_id,payload,created_at) VALUES (?,?,?,?)",
+                ("att-secret-1", env_event.event_id, json.dumps({
+                    "attachment_id": "att-secret-1", "event_id": env_event.event_id,
+                    "filename": ".env", "scope_type": "group", "scope_id": "client-1",
+                    "sensitive": True, "status": "stored",
+                }), "2026-11-19T00:00:00Z"),
+            )
+        with self.assertRaises(KnowledgeAccessError):
+            self.service.read_attachment_with_grant(emp_dm_grant, "att-secret-1")
+        listed_att_ids = {a["attachment_id"] for a in self.service.list_attachments_with_grant(emp_dm_grant)["attachments"]}
+        self.assertNotIn("att-secret-1", listed_att_ids)
 
 
 class KnowledgeApiTests(unittest.TestCase):

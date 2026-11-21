@@ -116,6 +116,32 @@ class DssuperAgentAdapterTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DssuperAgentAdapter("https://example.com")
 
+    def test_classify_message_posts_to_triage_endpoint_and_validates_result(self) -> None:
+        self.post_response_status = 200
+        self.post_response_body = {"classification": "ongoing_discussion", "reason": "Group pricing debate", "model": "zeno/ds"}
+        res = self.adapter.classify_message(
+            source_type="qq.group",
+            conversation_id="grp-1",
+            actor_id="u2",
+            actor_label="张三",
+            content="本月套餐毛利率还是太低",
+            bot_aliases=["憨憨"],
+            recent_messages=[{"role": "assistant", "actor": "company-agent", "text": "上一轮回答"}],
+        )
+        path, headers, body = self.requests[-1]
+        self.assertEqual(path, "/orchestrator/api/company-agent/classify")
+        self.assertEqual(headers["x-orchestrator-request"], "1")
+        self.assertEqual(body["actor_label"], "张三")
+        self.assertEqual(body["bot_aliases"], ["憨憨"])
+        self.assertEqual(res.classification, "ongoing_discussion")
+        self.assertEqual(res.model, "zeno/ds")
+
+        self.post_response_body = {"classification": "invalid_bucket", "reason": "bad"}
+        with self.assertRaises(DssuperAgentProtocolError):
+            self.adapter.classify_message(
+                source_type="qq.group", conversation_id="grp-1", actor_id="u2", content="hello",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

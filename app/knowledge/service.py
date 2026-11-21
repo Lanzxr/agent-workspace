@@ -12,11 +12,32 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from ..identity import IdentityRegistry
 from ..models import Event
 from ..store import Store
 from .config import KnowledgeSettings
 from .file_types import TEXT_EXTENSIONS, detect_file
 from .anythingllm import AnythingLLMClient
+
+_INTERNAL_INGEST_MARKERS = (
+    "/internal",
+    "/save-internal",
+    "[内部资料]",
+    "#内部资料",
+    "录入内部",
+    "补充内部资料",
+    "保存内部资料",
+    "存入内部知识库",
+    "加入内部知识库",
+)
+
+
+def _is_internal_ingest_message(content: str) -> bool:
+    text = (content or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(lowered.startswith(marker) or marker in lowered for marker in _INTERNAL_INGEST_MARKERS)
 
 
 class KnowledgeAccessError(PermissionError):
@@ -24,12 +45,14 @@ class KnowledgeAccessError(PermissionError):
 
 
 class KnowledgeService:
-    """Owns document provenance, scope checks, short-lived search grants and audit records."""
+    """Owns document provenance, 3-tier scope checks, short-lived search grants and audit records."""
 
     def __init__(self, store: Store, settings: KnowledgeSettings, storage_directory: Path,
-                 client: AnythingLLMClient | None = None) -> None:
+                 client: AnythingLLMClient | None = None,
+                 identities: IdentityRegistry | None = None) -> None:
         self.store = store
         self.settings = settings
+        self.identities = identities or IdentityRegistry(store)
         self.storage_directory = storage_directory.resolve()
         self.storage_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
@@ -55,10 +78,10 @@ class KnowledgeService:
         self.client.ensure_workspace(self.workspace_slug)
         original_path = self._store_original(path, digest)
         with self._ingest_lock:
-            row = self.store.connection.execute(
+            row = self.store.fetchone(
                 "SELECT engine_type,document_id,status,anythingllm_location,original_path "
                 "FROM knowledge_documents WHERE content_hash=?", (digest,)
-            ).fetchone()
+            )
             if row is None:
                 with self.store.transaction() as connection:
                     connection.execute(
@@ -212,14 +235,17 @@ class KnowledgeService:
         if not 60 <= ttl_seconds <= 3600:
             raise ValueError("knowledge grant lifetime must be between 60 and 3600 seconds")
         scope_type, scope_id = self.scope_for_event(event)
+        policy = self._access_policy_for_event(event)
         token = secrets.token_urlsafe(32)
         now = datetime.now(timezone.utc)
         with self.store.transaction() as connection:
-            connection.execute("INSERT INTO knowledge_grants(grant_hash,event_id,actor_id,scope_type,scope_id,is_admin,"
-                               "expires_at,call_count,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                               (self._grant_hash(token), event.event_id, event.actor_id, scope_type, scope_id,
-                                int(event.actor_id in self.settings.admin_user_ids),
-                                (now + timedelta(seconds=ttl_seconds)).isoformat(), 0, now.isoformat()))
+            connection.execute(
+                "INSERT INTO knowledge_grants(grant_hash,event_id,actor_id,scope_type,scope_id,is_admin,"
+                "source_type,source_id,expires_at,call_count,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (self._grant_hash(token), event.event_id, event.actor_id, scope_type, scope_id,
+                 int(policy["is_admin"]), event.source_type, event.source_id,
+                 (now + timedelta(seconds=ttl_seconds)).isoformat(), 0, now.isoformat()),
+            )
         return token
 
     def search_with_grant(self, token: str, query: str, *, limit: int = 8) -> dict[str, Any]:
@@ -261,14 +287,21 @@ class KnowledgeService:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
             raise ValueError("attachment limit must be between 1 and 50")
         grant = self._consume_grant(token)
-        rows = self.store.connection.execute("SELECT payload FROM attachments ORDER BY created_at DESC").fetchall()
+        policy = grant["policy"]
+        shared_ids = self._shared_ids_for_policy("attachment", policy)
+        rows = self.store.fetchall("SELECT payload FROM attachments ORDER BY created_at DESC")
         matches: list[dict[str, Any]] = []
         needle = query.casefold().strip()
         for row in rows:
             payload = self.store.decode(row["payload"])
-            if not grant["is_admin"] and (
-                    payload.get("scope_type") != grant["scope_type"]
-                    or payload.get("scope_id") != grant["scope_id"]):
+            if not self._can_access_record(
+                policy,
+                record_scope_type=str(payload.get("scope_type", "")),
+                record_scope_id=str(payload.get("scope_id", "")),
+                target_id=str(payload.get("attachment_id", "")),
+                shared_ids=shared_ids,
+                sensitive=bool(payload.get("sensitive")),
+            ):
                 continue
             safe = _public_attachment(payload)
             if needle and needle not in " ".join(str(safe.get(key, "")) for key in
@@ -313,8 +346,9 @@ class KnowledgeService:
         if not isinstance(document_id, str) or not 1 <= len(document_id) <= 200:
             raise ValueError("document_id is invalid")
         grant = self._consume_grant(token)
-        event_row = self.store.connection.execute("SELECT payload FROM events WHERE event_id=?",
-                                                  (grant["event_id"],)).fetchone()
+        event_row = self.store.fetchone(
+            "SELECT payload FROM events WHERE event_id=?", (grant["event_id"],)
+        )
         if event_row is None:
             raise KnowledgeAccessError("current event is unavailable")
         event = Event.from_dict(self.store.decode(event_row["payload"]))
@@ -342,13 +376,14 @@ class KnowledgeService:
                                             or not 1 <= len(before_event_id) <= 200):
             raise ValueError("before_event_id is invalid")
         grant = self._consume_grant(token)
-        current_row = self.store.connection.execute("SELECT payload FROM events WHERE event_id=?",
-                                                   (grant["event_id"],)).fetchone()
+        current_row = self.store.fetchone(
+            "SELECT payload FROM events WHERE event_id=?", (grant["event_id"],)
+        )
         if current_row is None:
             raise KnowledgeAccessError("current event is unavailable")
         current = Event.from_dict(self.store.decode(current_row["payload"]))
         messages: list[Event] = []
-        for row in self.store.connection.execute("SELECT payload FROM events"):
+        for row in self.store.fetchall("SELECT payload FROM events"):
             item = Event.from_dict(self.store.decode(row["payload"]))
             if (item.conversation_id == current.conversation_id and item.source_type == current.source_type
                     and item.source_id == current.source_id):
@@ -376,19 +411,28 @@ class KnowledgeService:
             raise ValueError("at most twenty valid attachment IDs may be attached to one DSH step")
         if len(set(attachment_ids)) != len(attachment_ids):
             raise ValueError("attachment IDs must be unique")
-        scope_type, scope_id = self.scope_for_event(event)
-        is_admin = event.actor_id in self.settings.admin_user_ids
+        policy = self._access_policy_for_event(event)
+        shared_ids = self._shared_ids_for_policy("attachment", policy)
         result = []
         for attachment_id in attachment_ids:
-            row = self.store.connection.execute("SELECT payload FROM attachments WHERE attachment_id=?",
-                                                (attachment_id,)).fetchone()
+            row = self.store.fetchone(
+                "SELECT payload FROM attachments WHERE attachment_id=?", (attachment_id,)
+            )
             if row is None:
                 raise KnowledgeAccessError("attachment is outside the current conversation scope")
             payload = self.store.decode(row["payload"])
-            if (not is_admin and (payload.get("scope_type") != scope_type or payload.get("scope_id") != scope_id)):
-                raise KnowledgeAccessError("attachment is outside the current conversation scope")
-            if payload.get("sensitive") and not is_admin:
+            sensitive = bool(payload.get("sensitive"))
+            if sensitive and not policy["is_admin"]:
                 raise KnowledgeAccessError("sensitive attachments require administrator access")
+            if not self._can_access_record(
+                policy,
+                record_scope_type=str(payload.get("scope_type", "")),
+                record_scope_id=str(payload.get("scope_id", "")),
+                target_id=attachment_id,
+                shared_ids=shared_ids,
+                sensitive=sensitive,
+            ):
+                raise KnowledgeAccessError("attachment is outside the current conversation scope")
             original_path = payload.get("original_path")
             if require_original and (not isinstance(original_path, str) or not Path(original_path).is_file()):
                 raise KnowledgeAccessError("attachment original has not been stored yet")
@@ -400,32 +444,45 @@ class KnowledgeService:
             raise ValueError("at most twenty valid knowledge document IDs may be attached to one DSH step")
         if len(set(document_ids)) != len(document_ids):
             raise ValueError("knowledge document IDs must be unique")
-        scope_type, scope_id = self.scope_for_event(event)
-        is_admin = event.actor_id in self.settings.admin_user_ids
+        policy = self._access_policy_for_event(event)
+        shared_ids = self._shared_ids_for_policy("document", policy)
+        sensitive_hashes = self._sensitive_hashes()
         docs = []
         for document_id in document_ids:
+            is_sensitive = document_id in sensitive_hashes
+            if is_sensitive and not policy["is_admin"]:
+                raise KnowledgeAccessError("a proposed document is outside the current conversation scope")
             sql = ("SELECT d.content_hash,d.content_hash AS document_id,d.original_path,d.size_bytes,d.status,"
-                   "s.filename,s.sensitive "
+                   "s.filename,s.sensitive,s.scope_type,s.scope_id "
                    "FROM knowledge_documents d JOIN knowledge_sources s ON s.content_hash=d.content_hash "
                    "WHERE d.content_hash=? AND d.engine_type='anythingllm' "
-                   "AND ((s.scope_type=? AND s.scope_id=?) OR ?=1) "
-                   "AND (?=1 OR NOT EXISTS (SELECT 1 FROM knowledge_sources private "
-                   "WHERE private.content_hash=d.content_hash AND private.sensitive=1)) "
-                   "ORDER BY s.created_at DESC LIMIT 1")
-            row = self.store.connection.execute(sql, (document_id, scope_type, scope_id, int(is_admin),
-                                                      int(is_admin))).fetchone()
-            if row is None or row["status"] != "ready" or not row["original_path"] or (row["sensitive"] and not is_admin):
+                   "ORDER BY s.created_at DESC")
+            rows = self.store.fetchall(sql, (document_id,))
+            matched = next(
+                (dict(row) for row in rows
+                 if row["status"] == "ready" and row["original_path"]
+                 and self._can_access_record(
+                     policy,
+                     record_scope_type=str(row["scope_type"]),
+                     record_scope_id=str(row["scope_id"]),
+                     target_id=document_id,
+                     shared_ids=shared_ids,
+                     sensitive=bool(row["sensitive"]) or is_sensitive,
+                 )),
+                None,
+            )
+            if matched is None:
                 raise KnowledgeAccessError("a proposed document is outside the current conversation scope")
-            docs.append(dict(row))
+            docs.append(matched)
         return docs
 
     def source_scope(self, event: Event) -> tuple[str, str]:
         return self.scope_for_event(event)
 
     def summary(self) -> dict[str, Any]:
-        rows = self.store.connection.execute(
+        rows = self.store.fetchall(
             "SELECT engine_type,status,COUNT(*) AS count FROM knowledge_documents GROUP BY engine_type,status"
-        ).fetchall()
+        )
         return {"configured": True, "provider": "anythingllm", "workspace": self.workspace_slug,
                 "documents": {row["status"] if row["engine_type"] == "anythingllm"
                               else f"legacy_ragflow_{row['status']}": row["count"] for row in rows},
@@ -434,22 +491,310 @@ class KnowledgeService:
     def list_documents(self, limit: int = 100) -> list[dict[str, Any]]:
         if not 1 <= limit <= 500:
             raise ValueError("knowledge document limit must be between 1 and 500")
-        rows = self.store.connection.execute(
+        rows = self.store.fetchall(
             "SELECT d.content_hash AS document_id,d.content_hash,d.canonical_filename,d.content_type,d.size_bytes,"
             "CASE WHEN d.engine_type='anythingllm' THEN d.status ELSE 'legacy_ragflow' END AS status,d.error,"
             "d.created_at,d.updated_at,COUNT(s.source_id) AS source_count "
             "FROM knowledge_documents d LEFT JOIN knowledge_sources s ON s.content_hash=d.content_hash "
             "GROUP BY d.content_hash ORDER BY d.created_at DESC LIMIT ?", (limit,)
-        ).fetchall()
+        )
+        docs = [dict(row) for row in rows]
+        if not docs:
+            return docs
+        hashes = [doc["content_hash"] for doc in docs]
+        placeholders = ",".join("?" for _ in hashes)
+        source_rows = self.store.fetchall(
+            f"SELECT DISTINCT content_hash,scope_type,scope_id FROM knowledge_sources WHERE content_hash IN ({placeholders})",
+            hashes,
+        )
+        scopes_by_hash: dict[str, list[dict[str, str]]] = {}
+        for row in source_rows:
+            scopes_by_hash.setdefault(row["content_hash"], []).append({
+                "scope_type": row["scope_type"], "scope_id": row["scope_id"],
+            })
+        share_rows = self.store.fetchall(
+            f"SELECT share_id,target_id,target_scope_type,target_scope_id,created_by,note,created_at "
+            f"FROM knowledge_shares WHERE target_kind='document' AND target_id IN ({placeholders})",
+            hashes,
+        )
+        shares_by_hash: dict[str, list[dict[str, Any]]] = {}
+        for row in share_rows:
+            shares_by_hash.setdefault(row["target_id"], []).append(dict(row))
+        for doc in docs:
+            doc["scopes"] = scopes_by_hash.get(doc["content_hash"], [])
+            doc["shares"] = shares_by_hash.get(doc["content_hash"], [])
+        return docs
+
+    def is_downward_compat_enabled(self) -> bool:
+        row = self.store.fetchone(
+            "SELECT payload FROM settings WHERE setting_key='downward_compatibility_enabled'"
+        )
+        if row is None:
+            return True
+        value = self.store.decode(row["payload"]).get("value", True)
+        return bool(value)
+
+    def share_item(self, *, target_kind: str, target_id: str, target_scope_type: str,
+                   target_scope_id: str, created_by: str, note: str = "") -> dict[str, Any]:
+        if target_kind not in {"document", "attachment"}:
+            raise ValueError("target_kind must be document or attachment")
+        if target_scope_type not in {"internal", "group", "direct"}:
+            raise ValueError("target_scope_type must be internal, group, or direct")
+        cleaned_id = (target_id or "").strip()
+        cleaned_scope_id = (target_scope_id or "").strip()
+        if not cleaned_id or not cleaned_scope_id:
+            raise ValueError("target_id and target_scope_id are required")
+        share_id = f"share-{secrets.token_hex(12)}"
+        now = _now()
+        with self.store.transaction() as connection:
+            if target_kind == "document":
+                if not connection.execute("SELECT 1 FROM knowledge_documents WHERE content_hash=?", (cleaned_id,)).fetchone():
+                    raise ValueError(f"document not found: {cleaned_id}")
+            else:
+                if not connection.execute("SELECT 1 FROM attachments WHERE attachment_id=?", (cleaned_id,)).fetchone():
+                    raise ValueError(f"attachment not found: {cleaned_id}")
+            connection.execute(
+                "INSERT INTO knowledge_shares(share_id,target_kind,target_id,target_scope_type,"
+                "target_scope_id,created_by,note,created_at) VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(target_kind,target_id,target_scope_type,target_scope_id) DO UPDATE "
+                "SET note=excluded.note,created_by=excluded.created_by",
+                (share_id, target_kind, cleaned_id, target_scope_type, cleaned_scope_id,
+                 created_by.strip()[:120] or "admin", note.strip()[:240], now),
+            )
+            row = connection.execute(
+                "SELECT share_id,target_kind,target_id,target_scope_type,target_scope_id,"
+                "created_by,note,created_at FROM knowledge_shares "
+                "WHERE target_kind=? AND target_id=? AND target_scope_type=? AND target_scope_id=?",
+                (target_kind, cleaned_id, target_scope_type, cleaned_scope_id),
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO audit(entity_type,entity_id,action,payload,created_at) VALUES (?,?,?,?,?)",
+                ("knowledge_share", row["share_id"], "shared", self.store.encode(dict(row)), now),
+            )
+            return dict(row)
+
+    def unshare_item(self, share_id: str) -> bool:
+        now = _now()
+        with self.store.transaction() as connection:
+            row = connection.execute("SELECT 1 FROM knowledge_shares WHERE share_id=?", (share_id,)).fetchone()
+            if row is None:
+                return False
+            connection.execute("DELETE FROM knowledge_shares WHERE share_id=?", (share_id,))
+            connection.execute(
+                "INSERT INTO audit(entity_type,entity_id,action,payload,created_at) VALUES (?,?,?,?,?)",
+                ("knowledge_share", share_id, "unshared", "{}", now),
+            )
+            return True
+
+    def list_shares(self, *, target_id: str | None = None) -> list[dict[str, Any]]:
+        if target_id:
+            rows = self.store.fetchall(
+                "SELECT share_id,target_kind,target_id,target_scope_type,target_scope_id,created_by,note,created_at "
+                "FROM knowledge_shares WHERE target_id=? ORDER BY created_at DESC",
+                (target_id,),
+            )
+        else:
+            rows = self.store.fetchall(
+                "SELECT share_id,target_kind,target_id,target_scope_type,target_scope_id,created_by,note,created_at "
+                "FROM knowledge_shares ORDER BY created_at DESC LIMIT 500"
+            )
         return [dict(row) for row in rows]
 
-    @staticmethod
-    def scope_for_event(event: Event) -> tuple[str, str]:
+    def ingest_internal_text(self, *, actor_id: str, title: str, text: str,
+                             event_id: str | None = None) -> dict[str, Any]:
+        body = (text or "").strip()
+        if not body:
+            raise ValueError("internal note text cannot be empty")
+        cleaned_title = re.sub(r'[\\/:*?"<>|\s]+', "-", (title or "internal-note").strip())[:60]
+        cleaned_title = cleaned_title.lstrip(".") or "internal-note"
+        synthetic_event = Event(
+            event_id=event_id or f"internal-note-{secrets.token_hex(8)}",
+            source_type="internal",
+            source_id="company",
+            conversation_id="internal:company",
+            actor_id=actor_id,
+            occurred_at=_now(),
+            content=body[:2000],
+            attachments=[],
+            capabilities=["dsh.task"],
+        )
+        with tempfile.TemporaryDirectory(prefix="company-agent-internal-note-") as temp_dir:
+            note_path = Path(temp_dir) / f"{cleaned_title}.md"
+            note_path.write_text(body, encoding="utf-8")
+            return self.ingest_file(synthetic_event, 1, note_path, f"{cleaned_title}.md")
+
+    def scope_for_event(self, event: Event) -> tuple[str, str]:
         if event.source_type in {"qq.group", "qq.guild"}:
+            group = self.identities.get_group(event.source_type, event.source_id)
+            if group is not None and group.tier == "internal":
+                return "internal", "company"
             return "group", event.source_id
         if event.source_type in {"qq.direct", "qq.private", "qq.c2c"}:
+            role = self.identities.user_role(event.actor_id, self.settings.admin_user_ids)
+            if role in {"admin", "employee"} and _is_internal_ingest_message(event.content):
+                return "internal", "company"
             return "direct", event.conversation_id
+        if event.source_type in {"internal", "admin", "console", "manual"}:
+            return "internal", "company"
         raise ValueError("knowledge scope is only defined for QQ group and direct conversations")
+
+    def _access_policy_for_event(self, event: Event) -> dict[str, Any]:
+        scope_type, scope_id = self.scope_for_event(event)
+        return self._build_access_policy(
+            source_type=event.source_type,
+            source_id=event.source_id,
+            conversation_id=event.conversation_id,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            actor_id=event.actor_id,
+        )
+
+    def _build_access_policy(self, *, source_type: str, source_id: str, conversation_id: str,
+                             scope_type: str, scope_id: str, actor_id: str) -> dict[str, Any]:
+        role = self.identities.user_role(actor_id, self.settings.admin_user_ids)
+        global_compat = self.is_downward_compat_enabled()
+        own_scopes: set[tuple[str, str]] = {(scope_type, scope_id)}
+        if source_type in {"qq.group", "qq.guild"}:
+            group = self.identities.get_group(source_type, source_id)
+            if group is not None and group.tier == "internal":
+                own_scopes.add(("internal", "company"))
+                own_scopes.add(("group", source_id))
+                if group.downward_compat == "on":
+                    compat = True
+                elif group.downward_compat == "off":
+                    compat = False
+                else:
+                    compat = global_compat
+                return {
+                    "tier": "internal",
+                    "role": role,
+                    "is_admin": False,
+                    "can_read_internal": True,
+                    "downward_compat": compat,
+                    "own_scopes": own_scopes,
+                }
+            # Location Ceiling Invariant: L1 client groups stay locked to their own group scope
+            # regardless of whether the speaker is an employee or admin.
+            return {
+                "tier": "client_group",
+                "role": role,
+                "is_admin": False,
+                "can_read_internal": False,
+                "downward_compat": False,
+                "own_scopes": {("group", source_id)},
+            }
+        if source_type in {"qq.direct", "qq.private", "qq.c2c"}:
+            if conversation_id:
+                own_scopes.add(("direct", conversation_id))
+            if role == "admin":
+                own_scopes.add(("internal", "company"))
+                return {
+                    "tier": "admin",
+                    "role": role,
+                    "is_admin": True,
+                    "can_read_internal": True,
+                    "downward_compat": True,
+                    "own_scopes": own_scopes,
+                }
+            if role == "employee":
+                own_scopes.add(("internal", "company"))
+                return {
+                    "tier": "internal",
+                    "role": role,
+                    "is_admin": False,
+                    "can_read_internal": True,
+                    "downward_compat": global_compat,
+                    "own_scopes": own_scopes,
+                }
+            return {
+                "tier": "direct",
+                "role": role,
+                "is_admin": False,
+                "can_read_internal": False,
+                "downward_compat": False,
+                "own_scopes": own_scopes,
+            }
+        # internal / admin / console / manual
+        if role == "admin":
+            own_scopes.add(("internal", "company"))
+            return {
+                "tier": "admin",
+                "role": role,
+                "is_admin": True,
+                "can_read_internal": True,
+                "downward_compat": True,
+                "own_scopes": own_scopes,
+            }
+        if role == "employee":
+            own_scopes.add(("internal", "company"))
+            return {
+                "tier": "internal",
+                "role": role,
+                "is_admin": False,
+                "can_read_internal": True,
+                "downward_compat": global_compat,
+                "own_scopes": own_scopes,
+            }
+        return {
+            "tier": "direct",
+            "role": role,
+            "is_admin": False,
+            "can_read_internal": False,
+            "downward_compat": False,
+            "own_scopes": own_scopes,
+        }
+
+    def _group_tier_sets(self) -> tuple[set[str], set[str]]:
+        internal_ids: set[str] = set()
+        disabled_client_ids: set[str] = set()
+        for group in self.identities.list_groups():
+            if group.tier == "internal":
+                internal_ids.add(group.source_id)
+            elif group.downward_compat == "off":
+                disabled_client_ids.add(group.source_id)
+        return internal_ids, disabled_client_ids
+
+    def _shared_ids_for_policy(self, target_kind: str, policy: dict[str, Any]) -> set[str]:
+        scopes = sorted(policy["own_scopes"])
+        if not scopes:
+            return set()
+        clauses = " OR ".join("(target_scope_type=? AND target_scope_id=?)" for _ in scopes)
+        params: list[str] = [target_kind]
+        for s_type, s_id in scopes:
+            params.extend((s_type, s_id))
+        rows = self.store.fetchall(
+            f"SELECT target_id FROM knowledge_shares WHERE target_kind=? AND ({clauses})",
+            params,
+        )
+        return {row[0] for row in rows}
+
+    def _sensitive_hashes(self) -> set[str]:
+        rows = self.store.fetchall(
+            "SELECT DISTINCT content_hash FROM knowledge_sources WHERE sensitive=1"
+        )
+        return {row[0] for row in rows}
+
+    def _can_access_record(self, policy: dict[str, Any], *, record_scope_type: str,
+                           record_scope_id: str, target_id: str, shared_ids: set[str],
+                           sensitive: bool) -> bool:
+        if sensitive:
+            return bool(policy["is_admin"])
+        if policy["is_admin"]:
+            return True
+        if (record_scope_type, record_scope_id) in policy["own_scopes"]:
+            return True
+        internal_ids, disabled_client_ids = self._group_tier_sets()
+        if policy["can_read_internal"]:
+            if record_scope_type == "internal":
+                return True
+            if record_scope_type == "group" and record_scope_id in internal_ids:
+                return True
+            if policy["downward_compat"] and record_scope_type in {"group", "direct"}:
+                if record_scope_type == "group" and record_scope_id in disabled_client_ids:
+                    pass
+                else:
+                    return True
+        return target_id in shared_ids
 
     def _consume_grant(self, token: str) -> dict[str, Any]:
         if not isinstance(token, str) or not 32 <= len(token) <= 256:
@@ -463,21 +808,64 @@ class KnowledgeService:
             )
             if updated.rowcount != 1:
                 raise KnowledgeAccessError("invalid, expired, or exhausted knowledge grant")
-            row = connection.execute("SELECT event_id,actor_id,scope_type,scope_id,is_admin,expires_at,call_count "
-                                     "FROM knowledge_grants WHERE grant_hash=?", (digest,)).fetchone()
-        return dict(row)
+            row = connection.execute(
+                "SELECT event_id,actor_id,scope_type,scope_id,is_admin,source_type,source_id,expires_at,call_count "
+                "FROM knowledge_grants WHERE grant_hash=?", (digest,)
+            ).fetchone()
+        grant = dict(row)
+        source_type = str(grant.get("source_type") or "")
+        source_id = str(grant.get("source_id") or "")
+        conversation_id = source_id
+        event_row = self.store.fetchone(
+            "SELECT payload FROM events WHERE event_id=?", (grant["event_id"],)
+        )
+        if event_row is not None:
+            event_payload = self.store.decode(event_row["payload"])
+            source_type = source_type or str(event_payload.get("source_type") or "")
+            source_id = source_id or str(event_payload.get("source_id") or "")
+            conversation_id = str(event_payload.get("conversation_id") or "") or source_id
+        if not source_type:
+            scope_type = grant["scope_type"]
+            scope_id = grant["scope_id"]
+            if scope_type == "group":
+                source_type, source_id, conversation_id = "qq.group", scope_id, scope_id
+            elif scope_type == "direct":
+                source_type, source_id, conversation_id = "qq.c2c", scope_id, scope_id
+            else:
+                source_type, source_id, conversation_id = "internal", scope_id, scope_id
+        policy = self._build_access_policy(
+            source_type=source_type,
+            source_id=source_id,
+            conversation_id=conversation_id,
+            scope_type=grant["scope_type"],
+            scope_id=grant["scope_id"],
+            actor_id=grant["actor_id"],
+        )
+        # Preserve stricter Location Ceiling recorded at grant issuance if applicable.
+        if not grant["is_admin"]:
+            policy["is_admin"] = False
+        grant["policy"] = policy
+        return grant
 
     def _grant_hash(self, token: str) -> str:
         return hmac.new(self.settings.grant_secret.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
 
     def _attachment_for_grant(self, grant: dict[str, Any], attachment_id: str) -> dict[str, Any]:
-        row = self.store.connection.execute("SELECT payload FROM attachments WHERE attachment_id=?",
-                                            (attachment_id,)).fetchone()
+        row = self.store.fetchone("SELECT payload FROM attachments WHERE attachment_id=?",
+                                  (attachment_id,))
         if row is None:
             raise KnowledgeAccessError("attachment is outside the current conversation scope")
         payload = self.store.decode(row["payload"])
-        if not grant["is_admin"] and (payload.get("scope_type") != grant["scope_type"]
-                                       or payload.get("scope_id") != grant["scope_id"]):
+        policy = grant["policy"]
+        shared_ids = self._shared_ids_for_policy("attachment", policy)
+        if not self._can_access_record(
+            policy,
+            record_scope_type=str(payload.get("scope_type", "")),
+            record_scope_id=str(payload.get("scope_id", "")),
+            target_id=attachment_id,
+            shared_ids=shared_ids,
+            sensitive=bool(payload.get("sensitive")),
+        ):
             raise KnowledgeAccessError("attachment is outside the current conversation scope")
         return payload
 
@@ -490,24 +878,30 @@ class KnowledgeService:
                                ("knowledge_tool", grant["event_id"], action, self.store.encode(value), _now()))
 
     def _authorized_sources(self, grant: dict[str, Any]) -> list[dict[str, Any]]:
-        if grant["is_admin"]:
-            query = ("SELECT d.content_hash AS document_id,d.status,d.content_hash,s.filename,s.sensitive "
-                     "FROM knowledge_documents d JOIN knowledge_sources s ON s.content_hash=d.content_hash "
-                     "WHERE d.engine_type='anythingllm' ORDER BY s.created_at DESC")
-            rows = self.store.connection.execute(query).fetchall()
-        else:
-            query = ("SELECT d.content_hash AS document_id,d.status,d.content_hash,s.filename,s.sensitive "
-                     "FROM knowledge_documents d "
-                     "JOIN knowledge_sources s ON s.content_hash=d.content_hash WHERE s.scope_type=? AND s.scope_id=? "
-                     "AND d.engine_type='anythingllm' "
-                     "AND s.sensitive=0 AND NOT EXISTS (SELECT 1 FROM knowledge_sources private "
-                     "WHERE private.content_hash=d.content_hash AND private.sensitive=1) "
-                     "ORDER BY s.created_at DESC")
-            rows = self.store.connection.execute(query, (grant["scope_type"], grant["scope_id"])).fetchall()
+        policy = grant["policy"]
+        shared_ids = self._shared_ids_for_policy("document", policy)
+        sensitive_hashes = self._sensitive_hashes()
+        query = ("SELECT d.content_hash AS document_id,d.status,d.content_hash,s.filename,"
+                 "s.sensitive,s.scope_type,s.scope_id "
+                 "FROM knowledge_documents d JOIN knowledge_sources s ON s.content_hash=d.content_hash "
+                 "WHERE d.engine_type='anythingllm' ORDER BY s.created_at DESC")
+        rows = self.store.fetchall(query)
         unique: dict[str, dict[str, Any]] = {}
         for row in rows:
-            value = dict(row)
-            unique.setdefault(value["document_id"], value)
+            doc_id = row["document_id"]
+            if doc_id in unique:
+                continue
+            is_sensitive = bool(row["sensitive"]) or (doc_id in sensitive_hashes)
+            if not self._can_access_record(
+                policy,
+                record_scope_type=str(row["scope_type"]),
+                record_scope_id=str(row["scope_id"]),
+                target_id=doc_id,
+                shared_ids=shared_ids,
+                sensitive=is_sensitive,
+            ):
+                continue
+            unique[doc_id] = dict(row)
         return list(unique.values())
 
     def _audit_search(self, grant: dict[str, Any], query: str, document_ids: list[str]) -> None:

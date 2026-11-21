@@ -276,6 +276,7 @@ class OutboxMessage:
     last_attempt_at: str | None = None
     last_error: str | None = None
     publication_disposition: str | None = None
+    attachments: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -283,7 +284,7 @@ class OutboxMessage:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "OutboxMessage":
         compatible = {"destination": {}, "attempts": 0, "last_attempt_at": None, "last_error": None,
-                      "publication_disposition": None}
+                      "publication_disposition": None, "attachments": []}
         compatible.update(value)
         return cls(**compatible)
 

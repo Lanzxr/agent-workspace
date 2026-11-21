@@ -422,6 +422,126 @@ class QQServiceTests(unittest.TestCase):
         self.assertEqual(retried.attempts, 2)
         self.assertEqual(len(self.api.sent), 1)
 
+    def test_long_task_sends_early_ack_and_final_reply_after_passive_window_expires(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = WorkspaceManager(root / "workspaces")
+            workspace = manager.provision("qq-agent")
+            self.settings = QQBotSettings(
+                "app", "secret",
+                allowed_publications=frozenset({"group_update"}),
+                auto_execute_capabilities=frozenset({"dsh.task"}),
+                workspace_id="qq-agent",
+            )
+            clock = {"now": 2000000000.0}
+
+            class LongTaskUpstream:
+                def submit_event(self, event, *, context=None):
+                    return DssuperAgentReceipt("stored", f"trigger:{event.event_id}",
+                                               f"thread:{event.conversation_id}")
+
+                def wait_for_decision(self, _thread_key, _trigger_id, *, timeout=600):
+                    return DssuperAgentDecision(
+                        decision_id="decision-long",
+                        trigger_ids=["trigger:qq:app:group:long-msg"],
+                        thread_key="thread:group",
+                        kind="ignore",
+                        outcome="ignore",
+                        reason="Need long research",
+                        occurred_at="2033-05-18T03:33:20Z",
+                        strength="inferred",
+                        assistant_intent={
+                            "action": "propose_work",
+                            "rationale": "Research task",
+                            "title": "调研 AI 开源热点",
+                            "objective": "整理今日热点",
+                            "completion_conditions": ["产出报告"],
+                            "plan_steps": [{
+                                "title": "采集并整理",
+                                "objective": "采集今日热点",
+                                "capability": "dsh.task",
+                                "completion_conditions": ["完成"],
+                            }],
+                            "publication": {"recommendation": "group_update", "reason": "群里提问", "body": "Working"},
+                        },
+                    )
+
+                def submit_execution_result(self, event, *, context=None):
+                    return DssuperAgentReceipt("stored", f"result:{event.event_id}",
+                                               f"thread:{event.conversation_id}")
+
+            control_plane = self.plane
+
+            class SlowDispatcher:
+                knowledge_service = None
+
+                def dispatch(self, execution_id: str):
+                    # Verify ack was already flushed while within the passive reply window!
+                    self.ack_count_during_dispatch = len(api.sent)
+                    # Advance simulated time beyond the 300s passive reply deadline before completion.
+                    clock["now"] = 2000000400.0
+                    exec_ws = manager.get(control_plane.get_execution(execution_id).workspace_id)
+                    artifact = exec_ws.root / "artifacts" / "executions" / execution_id / "step-01-result.md"
+                    artifact.parent.mkdir(parents=True, exist_ok=True)
+                    artifact.write_text(
+                        f"<!-- COMPANY_AGENT_FINAL_REPLY_BEGIN:{execution_id} -->\n"
+                        "今日 AI 开源热点报告已整理完成。\n"
+                        f"<!-- COMPANY_AGENT_FINAL_REPLY_END:{execution_id} -->\n",
+                        encoding="utf-8",
+                    )
+                    return ExecutionResult(
+                        execution_id, "succeeded",
+                        artifact_refs=[f"artifacts/executions/{execution_id}/step-01-result.md"],
+                    )
+
+            api = StubAPI()
+            dispatcher = SlowDispatcher()
+            workflow = DssuperAgentWorkflow(
+                self.plane, LongTaskUpstream(), manager=manager, dispatcher=dispatcher,
+                policy=AssistantPolicy(auto_execute_capabilities=frozenset({"dsh.task"})),
+            )
+            service = QQChannelService(self.plane, workflow, api, self.settings)
+            payload = {
+                "id": "long-msg",
+                "group_openid": "group",
+                "author": {"member_openid": "member"},
+                "content": "帮我调研一下今天最新的 AI 开源热点",
+                "timestamp": "2033-05-18T03:33:20Z",
+            }
+            with unittest.mock.patch("app.control_plane.time.time", side_effect=lambda: clock["now"]), \
+                    unittest.mock.patch("app.qq_channel.time.time", side_effect=lambda: clock["now"]):
+                service.handle_gateway_event("GROUP_MESSAGE_CREATE", payload)
+
+            self.assertEqual(dispatcher.ack_count_during_dispatch, 1)
+            self.assertEqual(len(api.sent), 2)
+            self.assertIn("已收到任务「调研 AI 开源热点」", api.sent[0].body)
+            self.assertEqual(api.sent[0].destination.get("msg_seq"), "1")
+            self.assertIn("今日 AI 开源热点报告已整理完成。", api.sent[1].body)
+            self.assertNotIn("msg_seq", api.sent[1].destination)
+
+    def test_background_outbox_flush_respects_backoff_and_max_attempts(self) -> None:
+        self.settings = QQBotSettings("app", "secret", frozenset({"group_update"}))
+        self.service = QQChannelService(self.plane, self.workflow, self.api, self.settings)
+        self.workflow.publication = {"recommendation": "group_update", "reason": "Complete", "body": "Done"}
+        self.api.fail = True
+        self.service.handle_gateway_event("GROUP_MESSAGE_CREATE", self.payload)
+        first = self.plane.list_outbox()[0]
+        self.assertEqual(first.attempts, 1)
+
+        # Immediate backoff flush should skip retrying within 15s of last_attempt_at.
+        self.api.fail = False
+        self.service.flush_outbox(respect_backoff=True)
+        still_failed = self.plane.list_outbox()[0]
+        self.assertEqual(still_failed.status, "failed")
+        self.assertEqual(still_failed.attempts, 1)
+
+        # Once backoff window elapses, background flush retries and delivers.
+        with unittest.mock.patch("app.qq_channel.time.time", return_value=4102444800.0):
+            self.service.flush_outbox(respect_backoff=True)
+        delivered = self.plane.list_outbox()[0]
+        self.assertEqual(delivered.status, "sent")
+        self.assertEqual(delivered.attempts, 2)
+
 
 class QQApiTests(unittest.TestCase):
     def test_gateway_url_adds_protocol_query_and_group_send_uses_destination(self) -> None:
@@ -463,6 +583,27 @@ class QQApiTests(unittest.TestCase):
             api.send_group_message(message)
 
         api._request.assert_not_called()
+
+    def test_passive_reply_expired_api_error_retries_as_active_send(self) -> None:
+        api = QQBotAPI(QQBotSettings("app", "secret"))
+        api.access_token = Mock(return_value="access-token")
+        api._request = Mock(side_effect=[
+            RuntimeError("QQ API returned HTTP 400: {\"code\":304023,\"message\":\"msg_id expired\"}"),
+            {"id": "sent-ok"},
+        ])
+        message = OutboxMessage("outbox-1", "group-1", "Update", "key", "sending", "now",
+                                {"channel": "qq", "group_openid": "group-1", "reply_to_message_id": "msg-1",
+                                 "reply_deadline_epoch": "2000000000", "msg_seq": "1"})
+        with unittest.mock.patch("app.qq_channel.time.time", return_value=1999999999):
+            api.send_group_message(message)
+
+        self.assertEqual(api._request.call_count, 2)
+        self.assertEqual(api._request.call_args_list[0].kwargs["body"], {
+            "msg_type": 0, "content": "Update", "msg_id": "msg-1", "msg_seq": 1,
+        })
+        self.assertEqual(api._request.call_args_list[1].kwargs["body"], {
+            "msg_type": 0, "content": "Update",
+        })
 
 class QQGatewayTests(unittest.TestCase):
     def test_identify_requests_group_messages_only_and_resume_uses_saved_cursor(self) -> None:
@@ -563,7 +704,8 @@ class QQAttachmentPipelineTests(unittest.TestCase):
                     source_event = plane.get_event(work_item.source_event_ids[0])
                     task_files = delivery.stage(source_event, workspace, execution_id, [],
                                                 list(request.parameters["attachment_ids"]))
-                    captured["files"] = [(item.filename, (workspace.directory("work") / item.relative_path).read_bytes())
+                    captured["paths"] = [item.relative_path for item in task_files]
+                    captured["files"] = [(item.filename, (workspace.root / item.relative_path).read_bytes())
                                           for item in task_files]
                     delivery.cleanup(workspace, execution_id)
                     return ExecutionResult(execution_id, "succeeded", artifact_refs=[])
@@ -599,6 +741,7 @@ class QQAttachmentPipelineTests(unittest.TestCase):
             service.process_prepared_attachments(event)
 
             self.assertIsNotNone(upstream.submitted)
+            self.assertTrue(all(p.startswith("work/inputs/") for p in captured.get("paths", [])))
             self.assertEqual(upstream.submitted.attachments[0]["status"], "stored")
             self.assertEqual(captured.get("files"), [("note.txt", b"selected original")])
             saved = plane.get_event("qq:app:group:pipeline-message")
@@ -633,6 +776,333 @@ class StubAPI:
         if self.fail:
             raise RuntimeError("mock QQ outage")
         self.sent.append(message)
+
+    def send_c2c_message(self, message):
+        if self.fail:
+            raise RuntimeError("mock QQ outage")
+        self.sent.append(message)
+
+
+class EnterpriseIsolationAndCommandsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.plane = ControlPlane.open(self.root / "control.sqlite")
+        self.manager = WorkspaceManager(self.root / "workspaces")
+        from app.identity import IdentityRegistry
+        from app.knowledge.config import KnowledgeSettings
+        from app.knowledge.service import KnowledgeService
+        self.identities = IdentityRegistry(self.plane.store)
+        self.api = StubAPI()
+        self.workflow = StubWorkflow()
+        self.workflow.manager = self.manager
+        self.settings = QQBotSettings(
+            "app", "secret",
+            allowed_publications=frozenset({"group_update"}),
+            auto_execute_capabilities=frozenset({"dsh.task"}),
+            workspace_id="qq-files",
+        )
+        from app.knowledge.config import KnowledgeSettings
+        from app.knowledge.service import KnowledgeService
+
+        class FakeLLM:
+            def ensure_workspace(self, _slug): return "w"
+            def upload_document(self, _path, _name, **_kwargs): return "doc-loc-1"
+            def upload_text_file(self, _w, _p, *, source_name): return "d"
+            def upload_binary_file(self, _w, _p, *, source_name, content_type): return "d"
+            def search(self, _w, _q, *, limit=8): return []
+
+        k_settings = KnowledgeSettings(
+            "http://127.0.0.1", "k", "s" * 40,
+            admin_user_ids=frozenset({"env-admin"}),
+        )
+        self.knowledge = KnowledgeService(
+            self.plane.store, k_settings, self.root / "knowledge", FakeLLM(), identities=self.identities,
+        )
+        self.service = QQChannelService(
+            self.plane, self.workflow, self.api, self.settings,
+            identities=self.identities, knowledge_service=self.knowledge,
+            workspace_manager=self.manager,
+        )
+
+    def tearDown(self) -> None:
+        self.plane.close()
+        self.temp.cleanup()
+
+    def test_auto_discovers_groups_isolates_workspaces_and_handles_commands(self) -> None:
+        admin_user = self.identities.create_user("Boss", role="admin")
+        emp_user = self.identities.create_user("Alice Emp", role="employee")
+        admin_code = self.identities.create_bind_code(admin_user.user_id)["code"]
+        emp_code = self.identities.create_bind_code(emp_user.user_id)["code"]
+
+        # Customer sends message in two distinct client groups -> auto-registered L1 + separate workspaces!
+        self.service.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+            "id": "m-c1", "group_openid": "client-grp-1", "author": {"member_openid": "cust-a"},
+            "content": "客户1问题", "timestamp": "2026-11-19T00:00:00Z",
+        })
+        self.service.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+            "id": "m-c2", "group_openid": "client-grp-2", "author": {"member_openid": "cust-b"},
+            "content": "客户2问题", "timestamp": "2026-11-19T00:00:01Z",
+        })
+        groups = {g.source_id: g for g in self.identities.list_groups()}
+        self.assertEqual(groups["client-grp-1"].tier, "client_group")
+        self.assertEqual(groups["client-grp-2"].tier, "client_group")
+        self.assertEqual(len(set(self.workflow.workspace_ids)), 2)
+        self.assertTrue(all(ws.startswith("ws-client-") for ws in self.workflow.workspace_ids))
+
+        # Bind admin & employee via DM /bind <code>
+        self.service.handle_gateway_event("C2C_MESSAGE_CREATE", {
+            "id": "m-bind-admin", "author": {"user_openid": "qq-boss"},
+            "content": f"/bind {admin_code}", "timestamp": "2026-11-19T00:00:02Z",
+        })
+        self.service.handle_gateway_event("C2C_MESSAGE_CREATE", {
+            "id": "m-bind-emp", "author": {"user_openid": "qq-alice"},
+            "content": f"/bind {emp_code}", "timestamp": "2026-11-19T00:00:03Z",
+        })
+        self.assertIn("企业管理员", self.api.sent[-2].body)
+        self.assertIn("企业员工", self.api.sent[-1].body)
+
+        # Employee tries /mark-internal in group -> denied! Admin succeeds!
+        self.service.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+            "id": "m-emp-mark", "group_openid": "internal-grp-1", "author": {"member_openid": "qq-alice"},
+            "content": "/mark-internal", "timestamp": "2026-11-19T00:00:04Z",
+        })
+        self.assertIn("权限不足", self.api.sent[-1].body)
+        self.service.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+            "id": "m-adm-mark", "group_openid": "internal-grp-1", "author": {"member_openid": "qq-boss"},
+            "content": "/mark-internal", "timestamp": "2026-11-19T00:00:05Z",
+        })
+        self.assertIn("企业内部群", self.api.sent[-1].body)
+
+        # Employee asks question in promoted internal group -> gets ws-internal workspace with tier=internal
+        self.service.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+            "id": "m-int-q", "group_openid": "internal-grp-1", "author": {"member_openid": "qq-alice"},
+            "content": "查一下内部SOP", "timestamp": "2026-11-19T00:00:06Z",
+        })
+        int_ws = self.workflow.workspace_ids[-1]
+        self.assertTrue(int_ws.startswith("ws-internal-"))
+        self.assertEqual(self.manager.get(int_ws).tier, "internal")
+
+        # Employee supplements internal knowledge via DM /internal
+        self.service.handle_gateway_event("C2C_MESSAGE_CREATE", {
+            "id": "m-emp-note", "author": {"user_openid": "qq-alice"},
+            "content": "/internal 2026最新内部报价折扣底线为85折。", "timestamp": "2026-11-19T00:00:07Z",
+        })
+        self.assertIn("企业内部共享知识库", self.api.sent[-1].body)
+        docs = self.knowledge.list_documents()
+        self.assertTrue(any(d["scopes"] == [{"scope_type": "internal", "scope_id": "company"}] for d in docs))
+
+        # Location ceiling: employee CANNOT run /internal inside a L1 client group
+        self.service.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+            "id": "m-emp-in-client", "group_openid": "client-grp-1", "author": {"member_openid": "qq-alice"},
+            "content": "/internal 试图在客户群写入内部库", "timestamp": "2026-11-19T00:00:08Z",
+        })
+        self.assertIn("安全隔离限制", self.api.sent[-1].body)
+
+    def test_dual_mode_direct_continuation_ambient_cooldown_silent_ack_and_capability_gap(self) -> None:
+        import threading
+        import time
+        import app.qq_channel as qq_mod
+        from app.dssuperagent import DssuperAgentClassifyResult
+
+        self.assertEqual(qq_mod.DEFAULT_AMBIENT_COOLDOWN_SECONDS, 300.0)
+        self.assertFalse(hasattr(qq_mod, "CONTINUATION_WINDOW_SECONDS"))
+
+        self.plane.set_setting("ambient_listen_enabled", True)
+        self.plane.set_setting("ambient_cooldown_seconds", 0.15)
+        self.plane.set_setting("bot_aliases", ["憨憨"])
+
+        recorded: list[tuple[str, str]] = []
+        classified_calls: list[dict[str, object]] = []
+        done = threading.Event()
+
+        class DualModeUpstream:
+            def classify_message(self, **kwargs):
+                classified_calls.append(kwargs)
+                text = str(kwargs.get("content") or "")
+                recent = kwargs.get("recent_messages") or []
+                has_recent_bot = any(isinstance(item, dict) and item.get("role") == "assistant" for item in recent)
+                if "哈哈" in text or text.strip() in {"收到", "好的"}:
+                    return DssuperAgentClassifyResult("chatter", "casual reaction")
+                if "憨憨" in text or ("11月份" in text and has_recent_bot):
+                    return DssuperAgentClassifyResult("direct", "addressing or continuing with bot")
+                return DssuperAgentClassifyResult("ongoing_discussion", "group topic needing cooldown")
+
+        class DualModeWorkflow:
+            def __init__(self, plane, manager):
+                self.plane = plane
+                self.manager = manager
+                self.upstream = DualModeUpstream()
+                self.on_execution_started = None
+
+            def process_event(self, event, *, workspace_id=None, interaction_mode="direct"):
+                from types import SimpleNamespace
+                from app.control_plane import NotFound
+                recorded.append((event.event_id, interaction_mode))
+                try:
+                    self.plane.get_conversation(event.conversation_id)
+                except NotFound:
+                    self.plane.create_conversation(
+                        conversation_id=event.conversation_id,
+                        kind=event.source_type,
+                        participant_refs=[event.actor_id],
+                        policy_version="dual-v1",
+                    )
+                self.plane.ingest_event(event)
+                wid = f"w-{event.event_id}"
+                self.plane.create_work_item(
+                    work_item_id=wid,
+                    title="dual mode test",
+                    objective="dual mode test",
+                    source_event_ids=[event.event_id],
+                    completion_conditions=["done"],
+                    risk_class="low",
+                    owner_ref=event.actor_id,
+                )
+                run_dict = {
+                    "status": "completed",
+                    "work_item_id": wid,
+                    "conversation_id": event.conversation_id,
+                    "policy_version": "dual-v1",
+                }
+                if interaction_mode == "direct":
+                    run_dict["publication"] = {
+                        "recommendation": "group_update", "reason": "direct request", "body": "已查到回复",
+                    }
+                    run_dict["status"] = "observed"
+                elif "失败" in event.content:
+                    run_dict["status"] = "execution_failed"
+                    run_dict["error"] = "silent timeout"
+                    run_dict["publication"] = {
+                        "recommendation": "group_update", "reason": "ambient report", "silent_ack": True,
+                    }
+                elif "利润率" in event.content:
+                    self.plane.record_capability_gap(
+                        event_id=event.event_id,
+                        source_type=event.source_type,
+                        source_id=event.source_id,
+                        conversation_id=event.conversation_id,
+                        group_tier="client_group",
+                        topic="套餐利润率计算",
+                        summary="群聊讨论套餐利润率未得出结论",
+                        missing_capability="ERP 成本台账脚本",
+                        gap_kind="tool_script",
+                        suggested_solution="接入 ERP 成本脚本后可自动产出利润率汇报",
+                    )
+                    run_dict["status"] = "observed"
+                    run_dict["publication"] = {"recommendation": "suppress", "reason": "missing capability"}
+                else:
+                    run_dict["publication"] = {
+                        "recommendation": "group_update", "reason": "ambient report", "silent_ack": True,
+                    }
+                    if self.on_execution_started:
+                        from types import SimpleNamespace
+                        self.on_execution_started(
+                            event,
+                            SimpleNamespace(
+                                publication=run_dict["publication"],
+                                decision={"assistant_intent": {"silent_ack": True}},
+                                work_item_id=run_dict["work_item_id"],
+                                conversation_id=event.conversation_id,
+                                policy_version="dual-v1",
+                            ),
+                            SimpleNamespace(title="后台计算汇报"),
+                        )
+                    run_dict["status"] = "observed"
+                return SimpleNamespace(to_dict=lambda: run_dict)
+
+        wf = DualModeWorkflow(self.plane, self.manager)
+        svc = QQChannelService(
+            self.plane, wf, self.api, self.settings,
+            identities=self.identities, workspace_manager=self.manager,
+        )
+        orig_fire = svc._fire_ambient
+
+        def _tracked_fire(cid: str, eid: str) -> None:
+            try:
+                orig_fire(cid, eid)
+            finally:
+                done.set()
+
+        svc._fire_ambient = _tracked_fire  # type: ignore[method-assign]
+        try:
+            # 1a. @ mention via GROUP_AT_MESSAGE_CREATE -> immediate direct (no classify call needed)
+            classify_before = len(classified_calls)
+            svc.handle_gateway_event("GROUP_AT_MESSAGE_CREATE", {
+                "id": "d-at", "group_openid": "g-dual", "author": {"member_openid": "u1"},
+                "content": "查一下状态", "timestamp": "2026-11-19T10:00:00Z",
+            })
+            self.assertEqual(recorded[-1], ("qq:app:group:d-at", "direct"))
+            self.assertEqual(len(classified_calls), classify_before)
+
+            # 1b. Standalone chatter ("哈哈") -> never enters heavy workflow or starts cooldown timer!
+            recorded_count_before_chatter = len(recorded)
+            svc.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+                "id": "c-1", "group_openid": "g-chatter", "author": {"member_openid": "u9"},
+                "content": "哈哈收到", "timestamp": "2026-11-19T10:00:30Z",
+            })
+            self.assertEqual(len(recorded), recorded_count_before_chatter)
+            self.assertEqual(svc._ambient_pending, {})
+
+            # 1c. Un-@ message -> AI triage sees alias hint -> direct, then bot reply enters context for follow-up!
+            svc.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+                "id": "d-alias", "group_openid": "g-alias", "author": {"member_openid": "u1"},
+                "content": "憨憨，帮我查一下报销流程", "timestamp": "2026-11-19T10:01:00Z",
+            })
+            self.assertEqual(recorded[-1], ("qq:app:group:d-alias", "direct"))
+            svc.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+                "id": "d-cont", "group_openid": "g-alias", "author": {"member_openid": "u1"},
+                "content": "找一下11月份的报销发票", "timestamp": "2026-11-19T10:01:20Z",
+            })
+            self.assertEqual(recorded[-1], ("qq:app:group:d-cont", "direct"))
+            self.assertTrue(any(m.get("role") == "assistant" for m in classified_calls[-1]["recent_messages"]))
+
+            # 2. Ambient discussion resets debounce timer, chatter postpones without replacing topic, then fires after cooldown
+            done.clear()
+            sent_before = len(self.api.sent)
+            svc.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+                "id": "amb-1", "group_openid": "g-amb", "author": {"member_openid": "u2"},
+                "content": "最近大家觉得套餐怎么定价？", "timestamp": "2026-11-19T10:05:00Z",
+            })
+            time.sleep(0.05)
+            self.assertFalse(done.is_set())
+            svc.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+                "id": "amb-2", "group_openid": "g-amb", "author": {"member_openid": "u3"},
+                "content": "主要是套餐利润率一直算不准", "timestamp": "2026-11-19T10:05:10Z",
+            })
+            time.sleep(0.05)
+            svc.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+                "id": "amb-chatter", "group_openid": "g-amb", "author": {"member_openid": "u4"},
+                "content": "哈哈确实", "timestamp": "2026-11-19T10:05:20Z",
+            })
+            self.assertTrue(done.wait(timeout=2.0))
+            self.assertEqual(recorded[-1], ("qq:app:group:amb-2", "ambient_cooldown"))
+            # Capability gap must suppress group reply!
+            self.assertEqual(len(self.api.sent), sent_before)
+            gaps = self.plane.list_capability_gaps(status="open")
+            self.assertEqual(len(gaps), 1)
+            self.assertEqual(gaps[0]["topic"], "套餐利润率计算")
+
+            # 3. Silent ambient execution suppresses ACK AND suppresses execution_failed spam
+            done.clear()
+            svc.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+                "id": "amb-fail", "group_openid": "g-amb-2", "author": {"member_openid": "u4"},
+                "content": "帮我看看失败数据汇总", "timestamp": "2026-11-19T10:10:00Z",
+            })
+            self.assertTrue(done.wait(timeout=2.0))
+            self.assertEqual(len(self.api.sent), sent_before)
+
+            done.clear()
+            svc.handle_gateway_event("GROUP_MESSAGE_CREATE", {
+                "id": "amb-ok", "group_openid": "g-amb-3", "author": {"member_openid": "u5"},
+                "content": "这周统计怎么一直没结论", "timestamp": "2026-11-19T10:12:00Z",
+            })
+            self.assertTrue(done.wait(timeout=2.0))
+            # No ACK emitted because silent_ack=True skipped _on_execution_started
+            ack_keys = [m for m in self.plane.list_outbox() if m.idempotency_key.startswith("qq-ack:qq:app:group:amb-ok")]
+            self.assertEqual(ack_keys, [])
+        finally:
+            svc.close()
 
 
 if __name__ == "__main__":

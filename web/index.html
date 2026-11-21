@@ -5,75 +5,1717 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Company Agent 控制台</title>
   <style>
-    :root{font:14px/1.5 system-ui,sans-serif;color:#202825;background:#f4f6f4}
-    *{box-sizing:border-box}body{margin:0}header{height:58px;background:#183c34;color:#fff;display:flex;align-items:center;padding:0 24px;gap:20px}
-    header strong{font-size:17px}.status{margin-left:auto;color:#dbeae3}main{max-width:1220px;margin:24px auto;padding:0 18px}
-    .bar{display:flex;gap:8px;align-items:center;margin:14px 0}input,select,textarea,button{font:inherit;padding:8px 10px;border:1px solid #cbd4cf;border-radius:4px;background:#fff;color:inherit}
-    button{cursor:pointer;background:#e8efeb}button.primary{background:#176b51;color:#fff;border-color:#176b51}button.danger{color:#9c2828}.token{width:min(420px,70vw)}
-    nav{display:flex;gap:4px;border-bottom:1px solid #cbd4cf;margin:16px 0;overflow:auto}nav button{border:0;background:transparent;border-radius:0;padding:10px 14px;white-space:nowrap}
-    nav button.active{border-bottom:2px solid #176b51;color:#176b51}section{display:none;padding:8px 0}section.active{display:block}
-    .muted,small{color:#65726c}.metrics{display:flex;gap:18px;flex-wrap:wrap;border-bottom:1px solid #d8dfdb;padding:15px 0}.metric{min-width:150px}
-    .metric b{font-weight:650}.service-list{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.service-pill{padding:6px 10px;border:1px solid #d2ddd7;background:#fff;border-radius:999px}
-    .conversation-shell{display:grid;grid-template-columns:minmax(260px,340px) 1fr;min-height:560px;border:1px solid #d8dfdb;background:#fff}
-    .conversation-list{border-right:1px solid #d8dfdb;overflow:auto}.conversation-item{padding:14px 16px;border:0;border-bottom:1px solid #edf1ee;background:#fff;text-align:left;width:100%;cursor:pointer}
-    .conversation-item:hover,.conversation-item.active{background:#eef5f1}.conversation-title{font-weight:650;display:flex;justify-content:space-between;gap:8px}.conversation-preview{color:#65726c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:4px}
-    .chat-pane{display:flex;flex-direction:column;min-width:0}.chat-header{padding:14px 18px;border-bottom:1px solid #d8dfdb}.chat-header strong{display:block}.chat-messages{padding:18px;overflow:auto;display:flex;flex-direction:column;gap:12px;flex:1;background:#fbfcfb}
-    .message{max-width:min(760px,88%);padding:10px 12px;border:1px solid #d7e1db;background:#fff;border-radius:8px;cursor:pointer;text-align:left}.message.user{align-self:flex-start}.message.agent{align-self:flex-end;background:#edf7f1}
-    .message-meta{display:flex;gap:8px;align-items:center;color:#65726c;font-size:12px;margin-bottom:4px}.message-body{white-space:pre-wrap;overflow-wrap:anywhere}.message-attachment{display:inline-block;margin-top:7px;padding:3px 7px;background:#f1f4f2;border-radius:3px;color:#486357;font-size:12px}
-    .status-chip{display:inline-block;padding:2px 7px;border-radius:999px;background:#edf1ee;color:#53655c;font-size:12px;white-space:nowrap}.status-chip.progress{background:#fff4d9;color:#795c19}.status-chip.done{background:#e2f4e9;color:#1f6948}.status-chip.failed{background:#fde9e7;color:#a13b32}
-    .empty{padding:32px;color:#65726c;text-align:center}.detail-backdrop{display:none;position:fixed;inset:0;background:rgba(20,35,29,.28);z-index:10}.detail-backdrop.open{display:block}
-    .detail-panel{position:absolute;right:0;top:0;height:100%;width:min(620px,94vw);background:#fff;box-shadow:-6px 0 24px rgba(0,0,0,.12);padding:22px;overflow:auto}.detail-close{float:right;border:0;background:transparent;font-size:20px;padding:2px 8px}
-    .detail-panel h2{margin:0 36px 4px 0}.detail-subtitle{color:#65726c;margin-bottom:18px}.detail-section{border-top:1px solid #e2e8e4;padding:14px 0}.timeline{border-left:2px solid #c9ded2;padding-left:16px}.timeline-item{position:relative;padding:0 0 14px}.timeline-item:before{content:"";position:absolute;left:-22px;top:5px;width:8px;height:8px;border-radius:50%;background:#176b51}.timeline-time{font-size:12px;color:#65726c}.timeline-label{font-weight:600}.id-grid{display:grid;grid-template-columns:130px 1fr;gap:7px;font-size:13px}.id-grid code{overflow-wrap:anywhere;color:#486357}
-    table{width:100%;border-collapse:collapse;margin:12px 0;background:#fff}td,th{text-align:left;padding:9px;border-bottom:1px solid #e1e6e3;vertical-align:top}th{font-weight:600;background:#edf2ef}
-    .form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:8px 0}.form input{min-width:130px}pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;background:#fff;padding:12px;border:1px solid #d8dfdb}
-    @media(max-width:760px){header{padding:0 14px}main{margin:12px auto;padding:0 10px}.conversation-shell{grid-template-columns:1fr}.conversation-list{max-height:240px;border-right:0;border-bottom:1px solid #d8dfdb}.chat-messages{min-height:360px}.message{max-width:96%}td,th{padding:6px;font-size:12px}.form>*{flex:1}}
+    :root{font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#1d2622;background:#f3f6f4;--brand:#176b51;--brand-dark:#124e3c;--border:#d7e0db;--card:#fff;--muted:#617069}
+    *{box-sizing:border-box}
+    body{margin:0;background:#f3f6f4}
+    header{min-height:56px;background:#163830;color:#fff;display:flex;align-items:center;padding:8px 24px;gap:14px;flex-wrap:wrap}
+    header strong{font-size:17px;letter-spacing:.2px}
+    .hdr-tag{font-size:12px;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,.14);color:#e2f0ea}
+    .status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:13px;color:#dbeae3}
+    .dot{width:8px;height:8px;border-radius:50%;background:#9fb0a8;display:inline-block}
+    .dot.ok{background:#47d18c}.dot.warn{background:#f5b942}.dot.err{background:#f06a5f}
+    main{max-width:1280px;margin:18px auto 36px;padding:0 18px}
+    .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0}
+    input,select,textarea,button{font:inherit;padding:7px 10px;border:1px solid #c9d4ce;border-radius:6px;background:#fff;color:inherit}
+    input:focus,select:focus,textarea:focus{outline:2px solid rgba(23,107,81,.22);border-color:var(--brand)}
+    button{cursor:pointer;background:#ebf1ee;transition:background .12s,border-color .12s}
+    button:hover:not(:disabled){background:#dfe9e4}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    button.primary{background:var(--brand);color:#fff;border-color:var(--brand)}
+    button.primary:hover:not(:disabled){background:var(--brand-dark)}
+    button.danger{color:#a12626;border-color:#e8c5c2;background:#fff8f7}
+    button.danger:hover:not(:disabled){background:#fdebe9}
+    button.sm{padding:4px 8px;font-size:12px}
+    .token{width:min(360px,68vw)}
+    .toast{display:none;padding:9px 14px;border-radius:6px;margin:8px 0;font-size:13px;border:1px solid transparent}
+    .toast.show{display:flex;justify-content:space-between;align-items:center;gap:12px}
+    .toast.ok{background:#e6f6ed;border-color:#b7e3c9;color:#145a3d}
+    .toast.err{background:#fdecea;border-color:#f2beb9;color:#982820}
+    .toast.info{background:#edf4f8;border-color:#c6dce9;color:#1e4d69}
+    nav{display:flex;gap:2px;border-bottom:1px solid #cbd4cf;margin:12px 0 16px;overflow:auto}
+    nav button{border:0;background:transparent;border-radius:6px 6px 0 0;padding:10px 14px;white-space:nowrap;color:#4a5852;font-weight:500}
+    nav button:hover{background:#e8efeb;color:#1d2622}
+    nav button.active{border-bottom:2px solid var(--brand);color:var(--brand);font-weight:650;background:#fff}
+    section{display:none;padding:4px 0}
+    section.active{display:block}
+    h2{font-size:16px;margin:18px 0 10px}
+    h3{font-size:14px;margin:14px 0 8px;color:#314039}
+    .muted,small,.hint{color:var(--muted)}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:14px}
+    .grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+    .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin:12px 0}
+    .metric{background:#fff;border:1px solid var(--border);border-radius:8px;padding:12px 14px}
+    .metric b{display:block;font-size:12px;color:var(--muted);margin-bottom:4px;font-weight:600}
+    .metric .val{font-size:18px;font-weight:700;color:#183c34}
+    .metric .sub{font-size:12px;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
+    .service-list{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+    .service-pill{padding:6px 12px;border:1px solid var(--border);background:#fff;border-radius:999px;display:inline-flex;align-items:center;gap:7px;font-size:13px}
+    .chip{display:inline-block;padding:2px 8px;border-radius:999px;background:#edf1ee;color:#4a5a52;font-size:12px;white-space:nowrap}
+    .chip.progress{background:#fff4d9;color:#7a5814}
+    .chip.done{background:#e2f4e9;color:#1b6645}
+    .chip.failed{background:#fde9e7;color:#a13b32}
+    .chip.l3{background:#f3e8ff;color:#6227a8}
+    .chip.l2{background:#e2f1fd;color:#165b91}
+    .chip.l1{background:#edf1ee;color:#4f5e57}
+    .chip.warn{background:#fff1dc;color:#8a4f0e}
+    .filter-row{display:flex;gap:6px;flex-wrap:wrap;padding:10px 12px;border-bottom:1px solid #edf1ee;background:#fafcfb}
+    .filter-row button.active{background:var(--brand);color:#fff;border-color:var(--brand)}
+    .conversation-shell{display:grid;grid-template-columns:minmax(270px,350px) 1fr;min-height:580px;max-height:74vh;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:#fff}
+    .conversation-list{border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+    .conversation-items{overflow:auto;flex:1}
+    .conversation-item{padding:12px 14px;border:0;border-bottom:1px solid #edf1ee;background:#fff;text-align:left;width:100%;display:block;border-radius:0}
+    .conversation-item:hover{background:#f4f9f6}
+    .conversation-item.active{background:#e8f3ed;border-left:3px solid var(--brand)}
+    .conversation-title{font-weight:650;display:flex;justify-content:space-between;align-items:center;gap:6px}
+    .conversation-sub{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--muted)}
+    .conversation-preview{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:4px;font-size:13px}
+    .chat-pane{display:flex;flex-direction:column;min-width:0;min-height:0}
+    .chat-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:#fafcfb}
+    .chat-messages{padding:16px;overflow:auto;display:flex;flex-direction:column;gap:10px;flex:1;background:#fbfcfb}
+    .message{max-width:min(760px,88%);padding:10px 13px;border:1px solid #d7e1db;background:#fff;border-radius:8px;cursor:pointer;text-align:left}
+    .message:hover{border-color:#9fc0b2}
+    .message.user{align-self:flex-start}
+    .message.agent{align-self:flex-end;background:#edf7f1}
+    .message-meta{display:flex;gap:7px;align-items:center;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-bottom:4px}
+    .message-body{white-space:pre-wrap;overflow-wrap:anywhere}
+    .message-attachment{display:inline-block;margin:6px 6px 0 0;padding:3px 8px;background:#f1f4f2;border-radius:4px;color:#3d574c;font-size:12px}
+    .empty{padding:32px;color:var(--muted);text-align:center}
+    .detail-backdrop{display:none;position:fixed;inset:0;background:rgba(20,35,29,.32);z-index:20}
+    .detail-backdrop.open{display:block}
+    .detail-panel{position:absolute;right:0;top:0;height:100%;width:min(660px,95vw);background:#fff;box-shadow:-6px 0 24px rgba(0,0,0,.14);padding:22px;overflow:auto}
+    .detail-close{float:right;border:0;background:transparent;font-size:22px;padding:2px 8px}
+    .detail-panel h2{margin:0 36px 4px 0}
+    .detail-subtitle{color:var(--muted);margin-bottom:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .detail-section{border-top:1px solid #e2e8e4;padding:12px 0}
+    .timeline{border-left:2px solid #c9ded2;padding-left:16px;margin-top:8px}
+    .timeline-item{position:relative;padding:0 0 12px}
+    .timeline-item:before{content:"";position:absolute;left:-22px;top:5px;width:8px;height:8px;border-radius:50%;background:var(--brand)}
+    .timeline-time{font-size:12px;color:var(--muted)}
+    .timeline-label{font-weight:600}
+    .id-grid{display:grid;grid-template-columns:130px 1fr;gap:7px;font-size:13px;align-items:center}
+    .id-grid code{overflow-wrap:anywhere;color:#365246;background:#f4f7f5;padding:2px 5px;border-radius:4px}
+    .table-wrap{overflow:auto;border:1px solid var(--border);border-radius:8px;background:#fff;margin:10px 0}
+    table{width:100%;border-collapse:collapse;margin:0;background:#fff}
+    td,th{text-align:left;padding:9px 10px;border-bottom:1px solid #e6ece9;vertical-align:middle}
+    th{font-weight:600;background:#eef3f0;font-size:13px;white-space:nowrap}
+    tr:last-child td{border-bottom:0}
+    .form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:6px 0}
+    .form input{min-width:130px}
+    .switch-card{background:#fff;border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+    .switch-card label{display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer}
+    .switch-card input[type=checkbox]{width:18px;height:18px;cursor:pointer}
+    .bind-box{display:none;background:#edf8f2;border:1px solid #9fd4b6;border-radius:8px;padding:12px 14px;margin:10px 0;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+    .bind-box.show{display:flex}
+    pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:0;background:#19231f;color:#e4efe9;padding:12px;border-radius:6px;font-size:12.5px;max-height:460px;overflow:auto}
+    .script-list{list-style:none;padding:0;margin:8px 0 0}
+    .script-list li{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dashed #e5ece8}
+    .script-list li:last-child{border-bottom:0}
+    code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+    @media(max-width:820px){
+      header{padding:8px 14px}
+      main{margin:12px auto;padding:0 10px}
+      .conversation-shell{grid-template-columns:1fr;max-height:none}
+      .conversation-list{max-height:280px;border-right:0;border-bottom:1px solid var(--border)}
+      .chat-messages{min-height:340px}
+      .message{max-width:96%}
+      td,th{padding:7px 6px;font-size:12px}
+      .form>*{flex:1}
+    }
   </style>
 </head>
 <body>
-<header><strong>Company Agent</strong><span>中控台</span><span class="status" id="status">未连接</span></header>
+<header>
+  <strong>Company Agent</strong>
+  <span class="hdr-tag">企业中控台</span>
+  <span class="hdr-tag" id="releaseBadge">版本: -</span>
+  <span class="hdr-tag" id="compatHeaderPill">向下兼容: -</span>
+  <span class="status"><span class="dot" id="connDot"></span><span id="status">未连接</span></span>
+</header>
+
 <main>
-  <div class="bar"><input id="token" class="token" type="password" placeholder="管理令牌"><button id="connect" class="primary">连接</button><small id="notice"></small></div>
+  <div class="bar">
+    <input id="token" class="token" type="password" placeholder="输入管理令牌 (COMPANY_AGENT_ADMIN_TOKEN)">
+    <button id="connect" class="primary">连接中控台</button>
+    <button id="disconnectBtn" class="sm" style="display:none">断开</button>
+    <button id="refreshNowBtn" class="sm" style="display:none">立即刷新</button>
+    <label class="small muted" style="display:flex;align-items:center;gap:5px;margin-left:auto">
+      <input id="autoRefresh" type="checkbox" checked> 自动刷新 (5s)
+    </label>
+  </div>
+  <div id="toast" class="toast" role="status"><span id="toastText"></span><button class="sm" id="toastClose">关闭</button></div>
+
   <nav>
-    <button class="active" data-tab="conversations">对话</button><button data-tab="overview">系统状态</button><button data-tab="users">用户与绑定</button>
-    <button data-tab="schedules">定时任务</button><button data-tab="settings">联网检索</button><button data-tab="logs">日志</button>
+    <button class="active" data-tab="conversations">对话与链路</button>
+    <button data-tab="overview">系统状态</button>
+    <button data-tab="users">员工·管理员与绑定</button>
+    <button data-tab="groups">群聊与知识隔离</button>
+    <button data-tab="tools">共享工具与组件</button>
+    <button data-tab="improvements">需求洞察与提升 <span id="gapNavBadge" class="chip warn" style="display:none">0</span></button>
+    <button data-tab="schedules">定时任务</button>
+    <button data-tab="settings">权限与联网开关</button>
+    <button data-tab="logs">审计与执行日志</button>
   </nav>
 
+  <!-- Tab 1: 对话与链路 -->
   <section id="conversations" class="active">
-    <div class="bar"><div><h2 style="margin:0">对话</h2><small>默认只显示消息和处理状态，点击消息查看完整链路。</small></div><button onclick="loadConversations()">刷新</button></div>
-    <div class="conversation-shell"><aside id="conversationList" class="conversation-list"></aside><div class="chat-pane"><div id="chatHeader" class="chat-header"><strong>选择一个会话</strong><small>收到的消息会显示在这里</small></div><div id="chatMessages" class="chat-messages"><div class="empty">暂无会话</div></div></div></div>
+    <div class="conversation-shell">
+      <aside class="conversation-list">
+        <div class="filter-row">
+          <input id="convSearch" placeholder="筛选群名 / 私聊 / 消息..." style="width:100%">
+        </div>
+        <div class="filter-row" id="convTierFilters">
+          <button class="sm active" data-tier="all">全部</button>
+          <button class="sm" data-tier="internal">内部 L2/L3</button>
+          <button class="sm" data-tier="client_group">客户群 L1</button>
+          <button class="sm" data-tier="direct">私聊</button>
+        </div>
+        <div id="conversationList" class="conversation-items"><div class="empty">请先连接管理令牌</div></div>
+      </aside>
+      <div class="chat-pane">
+        <div id="chatHeader" class="chat-header">
+          <div><strong>选择一个会话</strong><small>查看消息收发、角色身份、安全层级与隔离 Workspace</small></div>
+        </div>
+        <div id="chatMessages" class="chat-messages"><div class="empty">点击左侧会话查看消息记录；点击任意消息查看完整执行链路与日志</div></div>
+      </div>
+    </div>
   </section>
 
-  <section id="overview"><h2>系统状态</h2><div id="serviceList" class="service-list"></div><div id="metrics" class="metrics"></div><h3>当前 DSH 任务</h3><div id="activeDsh"></div><div class="bar"><button onclick="refresh()">刷新</button></div></section>
-  <section id="users"><h2>用户</h2><div class="form"><input id="displayName" placeholder="显示名称"><input id="timezone" value="Asia/Shanghai" placeholder="时区"><button class="primary" onclick="createUser()">创建用户</button></div><div id="userTable"></div><h2>平台身份绑定</h2><div class="form"><input id="provider" value="qq" placeholder="平台"><input id="account" placeholder="机器人/平台账号 ID"><input id="scope" placeholder="群 ID；全局填 *"><input id="external" placeholder="平台用户 ID"><select id="userId"></select><button class="primary" onclick="bindUser()">绑定</button></div><div id="bindingTable"></div></section>
-  <section id="schedules"><h2>定时任务</h2><div class="form"><input id="due" type="datetime-local"><input id="zone" value="Asia/Shanghai" placeholder="时区"><select id="sourceEvent"></select><select id="workItem"></select><input id="resumePrompt" placeholder="唤醒后继续做什么"><input id="groupOpenid" placeholder="回复群 OpenID"><button class="primary" onclick="createSchedule()">创建</button></div><div id="scheduleTable"></div></section>
-  <section id="settings"><h2>联网检索权限</h2><label><input id="dssuperagentWebEnabled" type="checkbox" onchange="saveWebSetting('dssuperagent-web-search','dssuperagentWebEnabled')">允许 DSSuperAgent 派出的 worker 通过 Company Agent 受控网关搜索和读取网页</label><br><label><input id="dshWebEnabled" type="checkbox" onchange="saveWebSetting('dsh-web-search','dshWebEnabled')">允许 Company Agent 启动的独立 DSH 任务使用内置 web_search / web_fetch</label><p id="webSettingsStatus" class="muted">worker 每次搜索前都会读取此开关，变更立即生效；两个权限相互独立。</p></section>
-  <section id="logs"><h2>最近审计记录</h2><div id="logTable"></div><h2>执行日志</h2><div class="form"><input id="logWorkspace" placeholder="Workspace ID"><input id="logExecution" placeholder="Execution ID"><button onclick="loadExecutionLogs()">读取</button></div><pre id="executionLogs"></pre></section>
+  <!-- Tab 2: 系统状态 -->
+  <section id="overview">
+    <div id="serviceList" class="service-list"></div>
+    <div id="metrics" class="metrics"></div>
+    <div class="card">
+      <div class="bar" style="margin:0 0 8px;justify-content:space-between">
+        <h3 style="margin:0">进行中的 DSH 任务</h3>
+        <button class="sm" id="overviewRefreshBtn">刷新状态</button>
+      </div>
+      <div id="activeDsh"></div>
+    </div>
+    <div class="card">
+      <h3 style="margin:0 0 8px">最近 DSH 执行记录</h3>
+      <div id="recentDsh"></div>
+    </div>
+  </section>
+
+  <!-- Tab 3: 用户·员工与管理员绑定 -->
+  <section id="users">
+    <div class="card">
+      <h2 style="margin-top:0">企业成员与角色管理</h2>
+      <p class="hint" style="margin:0 0 8px"><strong>L3 管理员</strong>：管理全部群聊、成员、知识共享与全局开关；<strong>L2 企业员工</strong>：共享企业内部知识与内部工具，支持私聊 <code>/internal</code> 补充内部资料；<strong>L1 客户</strong>：仅访问所属对话资料。</p>
+      <div class="form">
+        <input id="displayName" placeholder="姓名 / 显示名称">
+        <select id="userRole">
+          <option value="employee">企业员工 (L2)</option>
+          <option value="admin">企业管理员 (L3)</option>
+          <option value="customer">客户 (L1)</option>
+        </select>
+        <input id="timezone" value="Asia/Shanghai" placeholder="时区">
+        <button class="primary" id="createUserBtn">创建成员</button>
+      </div>
+      <div id="bindCodeBox" class="bind-box">
+        <div>
+          <strong id="bindCodeTitle">已生成一次性绑定码</strong>
+          <div class="small">让本人在 QQ 私聊或群聊中直接发送：<code id="bindCodeCommand"></code>（24 小时内单次有效）</div>
+        </div>
+        <button class="sm primary" id="copyBindCodeBtn">复制命令</button>
+      </div>
+      <div id="userTable"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">近期活跃的 QQ 外部发送者（快捷认领）</h3>
+      <p class="hint" style="margin:0 0 6px">无需翻日志查找 OpenID：点击「填入绑定表」即可直接关联到企业成员。</p>
+      <div id="seenActorsTable"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">平台身份手动绑定与管理</h3>
+      <div class="form">
+        <input id="provider" value="qq" placeholder="平台 (qq)" style="max-width:90px">
+        <input id="account" placeholder="机器人 AppID">
+        <input id="scope" value="*" placeholder="范围（全局建议 *，或填群 OpenID）">
+        <input id="external" placeholder="外部用户 OpenID">
+        <select id="userId"></select>
+        <button class="primary" id="bindUserBtn">确认绑定</button>
+      </div>
+      <div id="bindingTable"></div>
+    </div>
+  </section>
+
+  <!-- Tab 4: 群聊与知识隔离 -->
+  <section id="groups">
+    <div class="card">
+      <div class="bar" style="margin:0 0 6px;justify-content:space-between">
+        <h2 style="margin:0">QQ 群自动发现与层级隔离</h2>
+        <span id="compatBanner" class="chip">向下兼容: -</span>
+      </div>
+      <p class="hint" style="margin:0 0 8px">新群首次收到消息会自动登记为 <code>L1 客户群</code>（与所有客户群及内部资料物理隔离）。已绑定的管理员可在群内直接发 <code>/mark-internal</code> / <code>/mark-client</code> / <code>/compat on|off|inherit</code>，或直接在此修改保存。</p>
+      <div id="groupTable"></div>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">文档跨区显式授权分享</h2>
+      <p class="hint" style="margin:0 0 8px">当全局「向下兼容」关闭时，或需将内部文档特批给指定客户群时，可在此添加显式授权（客户群内永远受位置天花板约束，不会越权访问未授权资料）。</p>
+      <div class="form">
+        <select id="shareTargetKind">
+          <option value="document">知识库文档</option>
+          <option value="attachment">单条消息附件</option>
+        </select>
+        <select id="shareDocId" style="min-width:220px"></select>
+        <select id="shareScopePreset">
+          <option value="">快捷选择目标位置…</option>
+        </select>
+        <select id="shareTargetScopeType" style="max-width:140px">
+          <option value="group">客户群 (group)</option>
+          <option value="internal">内部库 (internal)</option>
+          <option value="direct">私聊 (direct)</option>
+        </select>
+        <input id="shareTargetScopeId" placeholder="目标群 ID / 会话 ID / company">
+        <input id="shareNote" placeholder="授权说明（可选）">
+        <button class="primary" id="shareDocBtn">添加授权</button>
+      </div>
+      <div id="shareTable"></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h3 style="margin-top:0">已入库文档清单</h3>
+        <div id="docsTable"></div>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">最近上传附件</h3>
+        <div id="attachmentsTable"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="bar" style="margin:0 0 6px;justify-content:space-between">
+        <h2 style="margin:0">会话工作区留存文件与交付产物（<span id="wsRetentionLabel">15</span> 天保留期）</h2>
+        <button class="sm" id="pruneFilesTableBtn">立即清理过期文件</button>
+      </div>
+      <p class="hint" style="margin:0 0 8px">同一会话/任务内的上传原件与产出报表（如新生成的 <code>.xlsx</code>）不再随单步清理，按群聊隔离保留至到期后自动清除。</p>
+      <div id="workspaceFilesTable"></div>
+    </div>
+  </section>
+
+  <!-- Tab 5: 共享工具与组件 -->
+  <section id="tools">
+    <div class="card">
+      <h2 style="margin-top:0">企业共享工具层（Bubblewrap 只读挂载）</h2>
+      <p class="hint" style="margin:0 0 10px">工具按安全层级存放于宿主机 <code>shared-tools/</code>：<strong>公共层 (common)</strong> 对全部工作区只读挂载；<strong>内部层 (internal)</strong> 仅对 L2 内部群、员工私聊与 L3 管理员只读挂载，L1 客户群不可见且 <code>PYTHONPATH</code>/<code>PATH</code> 隔离。Worker 可在 <code>bash</code> 内直接运行脚本名或 <code>import</code> 已安装 Python 包。</p>
+      <div id="toolsSummaryTable" class="grid-2"></div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h3 style="margin-top:0">安装 Python 组件包 (<code>pip --target</code>)</h3>
+        <div class="bar" style="margin-top:4px">
+          <span class="small muted">常用包快捷填入：</span>
+          <button class="sm" data-pkg-preset="pandas openpyxl">pandas + openpyxl</button>
+          <button class="sm" data-pkg-preset="python-docx pypdf">python-docx + pypdf</button>
+          <button class="sm" data-pkg-preset="beautifulsoup4 lxml">bs4 + lxml</button>
+        </div>
+        <div class="form">
+          <select id="toolLayerPkg">
+            <option value="common">公共层 (common)</option>
+            <option value="internal">内部层 (internal)</option>
+          </select>
+          <input id="toolPackages" placeholder="包名（空格分隔，如 pandas openpyxl）" style="flex:1;min-width:200px">
+          <button class="primary" id="installPkgBtn">安装组件</button>
+        </div>
+        <div id="toolPkgStatus" class="small muted" style="margin-top:6px"></div>
+      </div>
+
+      <div class="card">
+        <div class="bar" style="margin:0 0 6px;justify-content:space-between">
+          <h3 style="margin:0">自定义可执行脚本 (<code>bin/</code>)</h3>
+          <div style="display:flex;gap:6px">
+            <button class="sm" id="tplPyBtn">Python 模板</button>
+            <button class="sm" id="tplShBtn">Shell 模板</button>
+          </div>
+        </div>
+        <div class="form">
+          <select id="toolLayerScript">
+            <option value="common">公共层 (common)</option>
+            <option value="internal">内部层 (internal)</option>
+          </select>
+          <input id="toolScriptName" placeholder="脚本名（如 calc_quote.py）">
+          <input id="toolScriptDesc" placeholder="用途说明" style="flex:1">
+          <button class="primary" id="saveToolScriptBtn">保存脚本</button>
+        </div>
+        <textarea id="toolScriptContent" rows="7" style="width:100%;font-family:ui-monospace,Menlo,monospace;padding:9px" placeholder="#!/usr/bin/env python3&#10;print('hello')"></textarea>
+      </div>
+
+      <div class="card" id="mcpServersCard">
+        <div class="bar" style="margin:0 0 6px;justify-content:space-between">
+          <div>
+            <h3 style="margin:0">受控 MCP 工具服务（外网 API 隔离挂载）</h3>
+            <p class="hint" style="margin:4px 0 0">Worker 的 <code>bash</code> 沙箱始终断网隔离；需要访问后台或外网 API 时通过 MCP 服务运行在沙箱外部，并严格按「管理员 / 内部群 / 全部对话」分级挂载。<strong>密钥仅写入宿主 <code>runtime.env</code></strong>，此处只保存环境变量名引用，绝不回显或下发密钥到沙箱。</p>
+          </div>
+          <span class="chip" id="mcpCountBadge">0 个服务</span>
+        </div>
+        <div id="mcpServersTable"></div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+          <div class="form">
+            <input id="mcpServerId" placeholder="服务 ID（如 apizeno_ro）" style="min-width:150px">
+            <select id="mcpAccessLevel">
+              <option value="admin">仅管理员私聊 L3 (admin)</option>
+              <option value="internal">内部群与管理员 L2+L3 (internal)</option>
+              <option value="common">全部对话 L1+L2+L3 (common)</option>
+            </select>
+            <select id="mcpTransport">
+              <option value="stdio">stdio（不占端口）</option>
+              <option value="streamable-http">streamable-http（本地/HTTPS）</option>
+            </select>
+            <input id="mcpDescription" placeholder="工具用途说明（调度器可见）" style="flex:1;min-width:180px">
+          </div>
+          <div class="form">
+            <input id="mcpTargetInput" placeholder="stdio 命令及参数 或 HTTP URL（如 http://wsl-host:18768/mcp）" style="flex:1;min-width:260px">
+            <input id="mcpSecretRefInput" placeholder="环境变量引用 JSON（如 {&quot;APIZENO_KEY&quot;:&quot;COMPANY_AGENT_MCP_SECRET_APIZENO&quot;}）" style="flex:1;min-width:260px">
+            <button class="primary" id="mcpSaveBtn">保存 MCP 配置</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Tab 5B: 需求洞察与能力提升 -->
+  <section id="improvements">
+    <div class="card">
+      <div class="bar" style="margin:0 0 8px;justify-content:space-between">
+        <div>
+          <h2 style="margin:0">群聊潜在需求与 AI 能力提升清单</h2>
+          <p class="hint" style="margin:4px 0 0">当群聊中无人直接点名机器人、讨论到业务统计/计算/资料核查并遇冷无结果时：若现有工具足够，AI 会静默算出后直接给出汇报；<strong>若当前缺少权限或工具，AI 不会在群里打扰刷屏，而是把需求与提升建议沉淀于此</strong>——告诉你「如果补齐什么权限或工具，AI 就能帮你解决什么问题」。</p>
+        </div>
+        <div class="bar" id="gapStatusFilters" style="margin:0">
+          <button class="sm active" data-gap-status="open">待处理</button>
+          <button class="sm" data-gap-status="resolved">已补齐</button>
+          <button class="sm" data-gap-status="dismissed">已忽略</button>
+          <button class="sm" data-gap-status="all">全部</button>
+        </div>
+      </div>
+      <div id="gapTable"></div>
+    </div>
+  </section>
+
+  <!-- Tab 6: 定时任务 -->
+  <section id="schedules">
+    <div class="card">
+      <h2 style="margin-top:0">创建定时唤醒任务</h2>
+      <div class="form">
+        <input id="due" type="datetime-local">
+        <input id="zone" value="Asia/Shanghai" placeholder="时区" style="max-width:140px">
+        <select id="sourceEvent" style="min-width:200px"></select>
+        <select id="workItem" style="min-width:180px"></select>
+        <input id="resumePrompt" placeholder="到期后需要继续处理什么" style="flex:1;min-width:200px">
+        <input id="groupOpenid" placeholder="回调 QQ 群 OpenID（可选）">
+        <button class="primary" id="createScheduleBtn">创建任务</button>
+      </div>
+      <div id="scheduleTable"></div>
+    </div>
+  </section>
+
+  <!-- Tab 7: 权限与联网开关 -->
+  <section id="settings">
+    <div class="switch-card">
+      <div>
+        <label><input id="dssuperagentWebEnabled" type="checkbox"> 允许 DSSuperAgent 协调器通过网关检索公开网页</label>
+        <p class="muted" style="margin:4px 0 0">控制主协调会话在评估问题时是否可调用 SearXNG 受控搜索网关，变更后即时生效。</p>
+      </div>
+      <span id="dssWebBadge" class="chip">-</span>
+    </div>
+
+    <div class="switch-card">
+      <div>
+        <label><input id="dshWebEnabled" type="checkbox"> 允许 DSH 执行沙箱使用内置 <code>web_search</code> / <code>web_fetch</code></label>
+        <p class="muted" style="margin:4px 0 0">通过独立插件经本机受控网关查询 SearXNG，并结合 HTTP 抓取网页；沙箱 <code>bash</code> 保持断网与无秘钥。</p>
+      </div>
+      <span id="dshWebBadge" class="chip">-</span>
+    </div>
+
+    <div class="switch-card">
+      <div>
+        <label><input id="downwardCompatEnabled" type="checkbox"> 全局向下兼容开关（L2 企业内部层自动向下读取 L1 客户资料）</label>
+        <p class="muted" style="margin:4px 0 0">开启时：3 个内部群与已绑定员工私聊可自动检索所有客户群与客户私聊资料。关闭时：仅读内部库与显式授权分享条目。单个群可在「群聊与知识隔离」页覆盖。</p>
+      </div>
+      <span id="compatBadge" class="chip">-</span>
+    </div>
+
+    <div class="card" id="botBehaviorCard">
+      <div class="bar" style="margin:0 0 8px;justify-content:space-between">
+        <h3 style="margin:0">群聊感知与双模式触发设置</h3>
+        <span id="ambientBadge" class="chip">-</span>
+      </div>
+      <p class="hint" style="margin:0 0 10px"><strong>模式 1（直达对话）</strong>：私聊、<code>@机器人</code> 或经 DSS 语义判别为直接与机器人沟通/延续上下文对话（参考下方别名提示）时，<strong>0 秒延迟</strong>立即回复并执行任务。<strong>模式 2（群聊旁听）</strong>：当 DSS 语义判别为「群友互聊业务/问题」时，静默等待群聊遇冷（默认 300 秒 / 5 分钟）确认无人继续发言后再静默评估交付；纯寒暄闲聊将直接略过，不会占用主协调器会话。</p>
+      <div class="switch-card" style="margin-bottom:10px">
+        <div>
+          <label><input id="ambientListenEnabled" type="checkbox"> 启用群聊自然旁听与遇冷自动洞察</label>
+          <p class="muted" style="margin:4px 0 0">开启后：未 <code>@</code> 机器人的群聊消息先由 DSS 实时语义分流——直达诉求立刻响应；群友讨论进入长冷却防抖后再静默评估是否输出汇报或沉淀能力缺口。</p>
+        </div>
+      </div>
+      <div class="form">
+        <label class="small muted">群友互聊收尾等待秒数（建议 ≥300s）：<input id="ambientCooldownSeconds" type="number" min="0" max="3600" step="10" style="width:100px"></label>
+        <label class="small muted" style="flex:1;min-width:260px">常见昵称/别名提示（供 AI 语境参考，非硬性关键词门槛）：<input id="botAliasesInput" style="width:min(420px,100%)" placeholder="憨憨, 机器人, 小助手, AI助手, 助手"></label>
+        <button class="primary" id="saveBotBehaviorBtn">保存触发设置</button>
+      </div>
+    </div>
+
+    <div class="card" id="retentionSettingsCard">
+      <div class="bar" style="margin:0 0 8px;justify-content:space-between">
+        <h3 style="margin:0">会话工作区文件留存周期</h3>
+        <span id="retentionBadge" class="chip">-</span>
+      </div>
+      <p class="hint" style="margin:0 0 10px">默认保留 <strong>15 天（半个月）</strong>：同一群聊/私聊内的上传附件原件与任务产出文件（如 Excel 报表）在多步执行及后续连续对话中持续可用；到期后仅清理超过留存天数的工作区副本，不影响知识库持久化档案与审计日志。</p>
+      <div class="form">
+        <label class="small muted">保留天数（1–365 天，推荐 15 天）：<input id="retentionDaysInput" type="number" min="1" max="365" step="1" style="width:100px"></label>
+        <button class="primary" id="saveRetentionBtn">保存保留天数</button>
+        <button id="pruneFilesBtn">立即扫描清理过期文件</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">3 层企业权限与位置天花板说明</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>层级</th><th>覆盖范围</th><th>向下兼容 ON 时</th><th>向下兼容 OFF 时</th><th>工具层</th></tr></thead>
+          <tbody>
+            <tr><td><span class="chip l3">L3 管理员</span></td><td>Admin 控制台、管理员私聊</td><td>全部内部 + 全部客户 + <code>.env</code></td><td>全部内部 + 全部客户 + <code>.env</code></td><td><code>common + internal</code></td></tr>
+            <tr><td><span class="chip l2">L2 内部层</span></td><td>内部群、员工私聊</td><td>内部知识 + 自动向下读取 L1 客户资料</td><td>仅内部知识 + 显式授权分享</td><td><code>common + internal</code></td></tr>
+            <tr><td><span class="chip l1">L1 客户层</span></td><td>客户群、客户/未绑定私聊</td><td>仅本对话 + 显式授权（绝不向上读）</td><td>仅本对话 + 显式授权（绝不向上读）</td><td>仅 <code>common</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint" style="margin:6px 0 0"><strong>位置天花板不变性：</strong>即便管理员或员工在 L1 客户群内发言，该会话上下文也强制锁定在 L1 本群范围，防止将内部资料泄露给群内客户。</p>
+    </div>
+  </section>
+
+  <!-- Tab 8: 审计与执行日志 -->
+  <section id="logs">
+    <div class="card">
+      <h2 style="margin-top:0">DSH 执行日志 (STDOUT / STDERR)</h2>
+      <div class="form">
+        <select id="logExecPicker" style="min-width:280px"><option value="">从近期执行中选择…</option></select>
+        <input id="logWorkspace" placeholder="Workspace ID">
+        <input id="logExecution" placeholder="Execution ID">
+        <button class="primary" id="loadExecLogsBtn">读取日志</button>
+      </div>
+      <pre id="executionLogs">请选择或输入 Workspace ID 与 Execution ID 后读取日志</pre>
+    </div>
+
+    <div class="card">
+      <div class="bar" style="margin:0 0 8px;justify-content:space-between">
+        <h2 style="margin:0">审计事件流</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <select id="logTypeFilter">
+            <option value="">全部类型</option>
+            <option value="chat_group">群聊发现/变更</option>
+            <option value="managed_user">用户/员工/绑定码</option>
+            <option value="identity_binding">平台绑定</option>
+            <option value="knowledge_share">跨区授权分享</option>
+            <option value="capability_gap">群聊需求与能力缺口</option>
+            <option value="setting">系统开关</option>
+            <option value="execution">DSH 执行</option>
+            <option value="outbox">QQ 回复发送</option>
+          </select>
+          <input id="logSearch" placeholder="过滤操作 / ID / 详情...">
+        </div>
+      </div>
+      <div id="logTable"></div>
+    </div>
+  </section>
 </main>
-<div id="detailBackdrop" class="detail-backdrop"><aside class="detail-panel"><button class="detail-close" onclick="closeTrace()" aria-label="关闭">×</button><div id="detailContent"></div></aside></div>
+
+<div id="detailBackdrop" class="detail-backdrop">
+  <aside class="detail-panel">
+    <button class="detail-close" id="detailCloseBtn" aria-label="关闭">×</button>
+    <div id="detailContent"></div>
+  </aside>
+</div>
+
 <script>
-const $=id=>document.getElementById(id), apiToken=()=>sessionStorage.getItem('company-agent-token')||'';
-let selectedConversationId='';
-async function api(path,method='GET',body){const r=await fetch(path,{method,headers:{Authorization:`Bearer ${apiToken()}`,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});const x=await r.json();if(!r.ok)throw Error(x.error||r.statusText);return x}
-function esc(x){return String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-function fmtTime(x){if(!x)return '';const d=new Date(x);return Number.isNaN(d.getTime())?String(x):d.toLocaleString()}
-function statusClass(status){if(String(status).includes('fail')||status==='timed_out')return 'failed';if(['completed','sent','succeeded'].includes(status))return 'done';if(['received','observed','filtered'].includes(status))return '';return 'progress'}
-function chip(status,label){return `<span class="status-chip ${statusClass(status)}">${esc(label||status)}</span>`}
-function table(rows,cols,action){if(!rows.length)return '<p class="muted">暂无记录</p>';return `<table><thead><tr>${cols.map(c=>`<th>${c[1]}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${esc(typeof c[2]==='function'?c[2](r):r[c[0]]??'')}</td>`).join('')}<td>${action?`<button class="danger" data-id="${esc(action.id(r))}" data-action="${esc(typeof action.type==='function'?action.type(r):'')}">${esc(typeof action.label==='function'?action.label(r):action.label)}</button>`:''}</td></tr>`).join('')}</tbody></table>`}
-function renderServices(s){const active=s.active_dsh||[];const dsh=active.some(x=>x.status==='running')?'执行中':active.length?'排队中':'空闲';$('serviceList').innerHTML=[['QQ Gateway',s.qq_gateway],['Company Agent',s.service],['DSSuperAgent','由运行记录反映'],['DSH',dsh],['AnythingLLM','由资料库状态页查看']].map(x=>`<span class="service-pill"><b>${esc(x[0])}</b> ${esc(x[1])}</span>`).join('')}
-function renderActiveDsh(rows){if(!rows.length){$('activeDsh').innerHTML='<p class="muted">当前没有排队或执行中的 DSH 任务。</p>';return}$('activeDsh').innerHTML=table(rows,[['execution_id','Execution ID'],['work_item_id','Work Item'],['status','状态',x=>x.status==='running'?'执行中':'已排队'],['workspace_id','Workspace'],['updated_at','最近更新',x=>fmtTime(x.updated_at)]]);}
-function renderConversations(conversations){const list=$('conversationList');if(!conversations.length){list.innerHTML='<div class="empty">暂无收到的消息</div>';$('chatHeader').innerHTML='<strong>暂无会话</strong><small>收到的消息会显示在这里</small>';$('chatMessages').innerHTML='<div class="empty">暂无会话</div>';return}if(!selectedConversationId||!conversations.some(x=>x.conversation_id===selectedConversationId))selectedConversationId=conversations[0].conversation_id;list.innerHTML=conversations.map(c=>{const last=[...c.messages].reverse().find(x=>x.kind==='user')||c.messages[c.messages.length-1];return `<button class="conversation-item ${c.conversation_id===selectedConversationId?'active':''}" data-conversation="${esc(c.conversation_id)}"><span class="conversation-title"><span>${esc(c.label)}</span>${chip(last?.status||'',last?.status_label||'')}</span><span class="conversation-preview">${esc(last?.content||'')}</span><small>${esc(fmtTime(c.last_activity_at))}</small></button>`}).join('');const current=conversations.find(x=>x.conversation_id===selectedConversationId);renderConversation(current)}
-function renderConversation(conversation){if(!conversation)return;$('chatHeader').innerHTML=`<strong>${esc(conversation.label)}</strong><small>${esc(conversation.conversation_id)}</small>`;$('chatMessages').innerHTML=conversation.messages.map(m=>`<button class="message ${m.kind}" data-event-id="${esc(m.event_id)}"><span class="message-meta"><span>${m.kind==='agent'?'Company Agent':esc(m.actor_id)}</span><span>${esc(fmtTime(m.occurred_at))}</span>${chip(m.status,m.status_label)}</span><span class="message-body">${esc(m.content||'(附件)')}</span>${(m.attachments||[]).map(a=>`<span class="message-attachment">附件：${esc(a.filename||a.name||'未命名')}</span>`).join('')}</button>`).join('')||'<div class="empty">暂无消息</div>'}
-async function loadConversations(){try{const data=await api('/api/conversations?limit=50');renderConversations(data.conversations||[])}catch(e){$('notice').textContent=e.message}}
-async function openTrace(eventId){try{const x=await api('/api/message-trace?event_id='+encodeURIComponent(eventId));$('detailContent').innerHTML=`<h2>消息详情</h2><div class="detail-subtitle">${esc(fmtTime(x.occurred_at))} · ${esc(x.source_type)} · ${chip(x.status,x.status_label)}</div><div class="detail-section"><b>用户消息</b><p class="message-body">${esc(x.content||'(附件)')}</p>${(x.attachments||[]).map(a=>`<span class="message-attachment">附件：${esc(a.filename||a.name||'未命名')} · ${esc(a.status||'已收到')}</span>`).join('')}</div><div class="detail-section"><b>处理进度</b><div class="timeline">${(x.timeline||[]).map(t=>`<div class="timeline-item"><div class="timeline-time">${esc(fmtTime(t.created_at))}</div><div class="timeline-label">${esc(t.label)}</div></div>`).join('')||'<div class="muted">暂无处理记录</div>'}</div></div><div class="detail-section"><b>关联对象</b><div class="id-grid"><span>消息 ID</span><code>${esc(x.event_id)}</code><span>Work</span><code>${esc(x.work_item?.work_item_id||'尚未创建')}</code><span>Execution</span><code>${esc((x.executions||[]).map(e=>e.execution_id).join(', ')||'尚未创建')}</code><span>Workspace</span><code>${esc((x.executions||[]).map(e=>e.workspace_id).filter(Boolean).join(', ')||x.assistant_run?.workspace_id||'尚未创建')}</code><span>回复</span><code>${esc((x.outbox||[]).map(o=>o.status).join(', ')||'尚未生成')}</code></div></div>`;$('detailBackdrop').classList.add('open')}catch(e){$('notice').textContent=e.message}}
-function closeTrace(){$('detailBackdrop').classList.remove('open')}
-async function refresh(){try{const s=await api('/api/status');$('status').textContent='在线';$('notice').textContent='';renderServices(s);renderActiveDsh(s.active_dsh||[]);$('metrics').innerHTML=`<div class="metric"><b>工作项</b><br>${esc(JSON.stringify(s.work_items||{}))}</div><div class="metric"><b>DSSuperAgent 运行</b><br>${esc(JSON.stringify(s.dssuperagent_runs||{}))}</div><div class="metric"><b>DSH 执行</b><br>${esc(JSON.stringify(s.dsh_executions||{}))}</div><div class="metric"><b>Workspace 存储</b><br>${(s.workspace_bytes/1048576).toFixed(1)} MB</div><div class="metric"><b>数据目录</b><br>${esc(s.data_directory)}</div>`;await loadConversations();const [u,b,t,w,l]=await Promise.all([api('/api/users'),api('/api/bindings'),api('/api/schedules'),api('/api/settings/web-search'),api('/api/logs')]);$('userTable').innerHTML=table(u.users,[['display_name','名称'],['user_id','用户 ID'],['time_zone','时区'],['status','状态']]);$('userId').innerHTML=u.users.map(x=>`<option value="${esc(x.user_id)}">${esc(x.display_name)} (${esc(x.user_id)})</option>`).join('');$('bindingTable').innerHTML=table(b.bindings,[['provider','平台'],['account_id','账号'],['scope_id','范围'],['external_id','外部 ID'],['user_id','内部用户']],{label:'解绑',id:x=>x.binding_id});$('scheduleTable').innerHTML=table(t.tasks,[['schedule_id','任务 ID'],['due_at','UTC 执行时间'],['status','状态'],['work_item_id','工作项'],['resume_prompt','续接提示',x=>x.payload.resume_prompt]],{label:x=>x.status==='failed'?'重试':'取消',type:x=>x.status==='failed'?'retry':'cancel',id:x=>x.schedule_id});$('dssuperagentWebEnabled').checked=w.dssuperagent_enabled;$('dshWebEnabled').checked=w.dsh_enabled;$('logTable').innerHTML=table(l.logs,[['created_at','时间'],['entity_type','类型'],['action','操作'],['entity_id','记录 ID'],['payload','详情',x=>JSON.stringify(x.payload)]])}catch(e){$('status').textContent='连接失败';$('notice').textContent=e.message}}
-async function createUser(){await api('/api/users','POST',{display_name:$('displayName').value,time_zone:$('timezone').value});$('displayName').value='';refresh()}
-async function bindUser(){await api('/api/bindings','POST',{provider:$('provider').value,account_id:$('account').value,scope_id:$('scope').value||'*',external_id:$('external').value,user_id:$('userId').value});refresh()}
-async function createSchedule(){const group=$('groupOpenid').value.trim();await api('/api/schedules','POST',{due_at:$('due').value,time_zone:$('zone').value,source_event_id:$('sourceEvent').value,work_item_id:$('workItem').value,resume_prompt:$('resumePrompt').value,destination:group?{channel:'qq',group_openid:group}:{}});refresh()}
-async function loadScheduleSources(){const x=await api('/api/schedule-sources');$('sourceEvent').innerHTML=x.events.map(e=>`<option value="${esc(e.event_id)}">${esc(e.event_id)} · ${esc(e.content)}</option>`).join('');$('workItem').innerHTML=x.work_items.map(w=>`<option value="${esc(w.work_item_id)}">${esc(w.title)} · ${esc(w.status)}</option>`).join('')}
-async function saveWebSetting(setting,inputId){const input=$(inputId),previous=!input.checked;input.disabled=true;$('notice').textContent='';$('webSettingsStatus').textContent='正在保存…';try{const saved=await api('/api/settings/'+setting,'PUT',{enabled:input.checked});input.checked=saved.enabled;$('webSettingsStatus').textContent='已保存，worker 下一次搜索立即生效'}catch(e){try{input.checked=(await api('/api/settings/'+setting)).enabled}catch{input.checked=previous}$('notice').textContent='联网权限保存失败：'+e.message;$('webSettingsStatus').textContent='保存失败，当前开关状态已重新读取'}finally{input.disabled=false}}
-async function loadExecutionLogs(){const q=new URLSearchParams({workspace_id:$('logWorkspace').value,execution_id:$('logExecution').value});const logs=await api('/api/workspace-logs?'+q);$('executionLogs').textContent=`STDOUT\n${logs.stdout}\n\nSTDERR\n${logs.stderr}`}
-$('connect').onclick=()=>{sessionStorage.setItem('company-agent-token',$('token').value);$('notice').textContent='';refresh()};$('token').value=apiToken();document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button,section').forEach(x=>x.classList.remove('active'));b.classList.add('active');$(b.dataset.tab).classList.add('active');if(b.dataset.tab==='schedules')loadScheduleSources()});document.getElementById('conversationList').addEventListener('click',e=>{const item=e.target.closest('[data-conversation]');if(item){selectedConversationId=item.dataset.conversation;loadConversations()}});document.getElementById('chatMessages').addEventListener('click',e=>{const item=e.target.closest('[data-event-id]');if(item)openTrace(item.dataset.eventId)});document.getElementById('detailBackdrop').addEventListener('click',e=>{if(e.target.id==='detailBackdrop')closeTrace()});document.body.addEventListener('click',async e=>{const b=e.target.closest('button.danger');if(!b)return;const id=encodeURIComponent(b.dataset.id);const p=b.closest('tr').parentElement.parentElement.parentElement.id;if(p==='bindingTable')await api('/api/bindings?binding_id='+id,'DELETE');else if(p==='scheduleTable'&&b.dataset.action==='retry')await api('/api/schedules/retry','POST',{schedule_id:id});else if(p==='scheduleTable')await api('/api/schedules?schedule_id='+id,'DELETE');refresh()});if(apiToken())refresh();setInterval(()=>{if(apiToken())refresh()},5000);
+const $ = id => document.getElementById(id);
+const apiToken = () => sessionStorage.getItem('company-agent-token') || '';
+
+const state = {
+  selectedConversationId: '',
+  convTierFilter: 'all',
+  gapStatusFilter: 'open',
+  conversations: [],
+  status: null,
+  usersData: null,
+  groups: [],
+  knowledgeData: null,
+  gaps: [],
+  logs: [],
+  qqAppId: '',
+  toastTimer: null,
+};
+
+function esc(x) {
+  return String(x ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function fmtTime(x) {
+  if (!x) return '-';
+  const d = new Date(x);
+  return Number.isNaN(d.getTime()) ? String(x) : d.toLocaleString();
+}
+
+function fmtBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(2) + ' MB';
+}
+
+function showToast(text, kind = 'info') {
+  const box = $('toast');
+  $('toastText').textContent = text;
+  box.className = `toast show ${kind}`;
+  if (state.toastTimer) clearTimeout(state.toastTimer);
+  if (kind !== 'err') {
+    state.toastTimer = setTimeout(() => { box.className = 'toast'; }, 4500);
+  }
+}
+
+function switchTab(tabName) {
+  document.querySelectorAll('nav button, section').forEach(el => el.classList.remove('active'));
+  const btn = document.querySelector(`nav button[data-tab="${tabName}"]`);
+  if (btn) btn.classList.add('active');
+  const sec = $(tabName);
+  if (sec) sec.classList.add('active');
+  if (tabName === 'schedules') loadScheduleSources().catch(e => showToast(e.message, 'err'));
+}
+
+async function api(path, method = 'GET', body) {
+  const r = await fetch(path, {
+    method,
+    headers: { Authorization: `Bearer ${apiToken()}`, 'Content-Type': 'application/json' },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  let x = {};
+  try { x = await r.json(); } catch { x = {}; }
+  if (!r.ok) {
+    if (r.status === 401) throw Error('管理令牌认证失败 (401)，请检查令牌是否正确');
+    throw Error(x.error || r.statusText || `HTTP ${r.status}`);
+  }
+  return x;
+}
+
+function statusClass(status) {
+  const s = String(status || '');
+  if (s.includes('fail') || s === 'timed_out' || s === 'cancelled') return 'failed';
+  if (['completed', 'sent', 'succeeded', 'ready', 'connected', 'active'].includes(s)) return 'done';
+  if (['received', 'observed', 'filtered', 'offline', 'unknown'].includes(s)) return '';
+  return 'progress';
+}
+
+function chip(status, label) {
+  return `<span class="chip ${statusClass(status)}">${esc(label || status)}</span>`;
+}
+
+function roleChip(role) {
+  if (role === 'admin') return '<span class="chip l3">管理员 L3</span>';
+  if (role === 'employee') return '<span class="chip l2">员工 L2</span>';
+  if (role === 'system') return '<span class="chip done">Agent</span>';
+  return '<span class="chip l1">客户 L1</span>';
+}
+
+function tierChip(tier, label) {
+  if (tier === 'admin') return `<span class="chip l3">${esc(label || '管理员 L3')}</span>`;
+  if (tier === 'internal') return `<span class="chip l2">${esc(label || '内部 L2')}</span>`;
+  return `<span class="chip l1">${esc(label || '客户 L1')}</span>`;
+}
+
+function scopeBadge(scopeType, scopeId) {
+  if (scopeType === 'internal') return '<span class="chip l2">内部共享库</span>';
+  if (scopeType === 'group') {
+    const grp = state.groups.find(g => g.source_id === scopeId);
+    const name = grp?.display_name ? `${grp.display_name} (${scopeId.slice(0, 8)})` : scopeId.slice(0, 12);
+    return `<span class="chip ${grp?.tier === 'internal' ? 'l2' : 'l1'}">群: ${esc(name)}</span>`;
+  }
+  if (scopeType === 'direct') return `<span class="chip l1">私聊: ${esc(scopeId.slice(0, 12))}</span>`;
+  return `<span class="chip">${esc(scopeType)}:${esc(scopeId)}</span>`;
+}
+
+function renderServices(s) {
+  const active = s.active_dsh || [];
+  const dshState = active.some(x => x.status === 'running') ? '执行中' : active.length ? `排队 (${active.length})` : '空闲';
+  const dshDot = active.length ? 'warn' : 'ok';
+  const qqDot = s.qq_gateway === 'connected' ? 'ok' : (s.qq_gateway === 'offline' ? 'err' : 'warn');
+  const k = s.knowledge_summary || {};
+  const docsReady = k.configured ? (k.documents?.ready || 0) : 0;
+  const kLabel = k.configured ? `已连接 (${docsReady} 篇就绪)` : '未配置';
+  const kDot = k.configured ? 'ok' : 'warn';
+  const dssStats = s.dssuperagent_stats || {};
+  const dssLabel = dssStats.total ? `累计 ${dssStats.total} 轮` : '就绪';
+  const pills = [
+    ['QQ Gateway', s.qq_gateway, qqDot],
+    ['Company Agent', `${s.service} (${s.release_id || 'source'})`, 'ok'],
+    ['DSSuperAgent', dssLabel, 'ok'],
+    ['DSH 沙箱执行器', dshState, dshDot],
+    ['AnythingLLM', kLabel, kDot],
+  ];
+  $('serviceList').innerHTML = pills.map(p =>
+    `<span class="service-pill"><span class="dot ${p[2]}"></span><b>${esc(p[0])}</b> ${esc(p[1])}</span>`
+  ).join('');
+}
+
+function renderMetrics(s) {
+  const wi = s.work_items || {};
+  const dsh = s.dsh_executions || {};
+  const uc = s.user_counts || {};
+  const gc = s.group_counts || {};
+  const cards = [
+    {
+      title: '工作项统计 (Work Items)',
+      val: `${Object.values(wi).reduce((a, b) => a + b, 0)} 项`,
+      sub: Object.entries(wi).map(([k, v]) => `${k}:${v}`).join(' · ') || '暂无工作项',
+    },
+    {
+      title: 'DSH 任务统计',
+      val: `${dsh.succeeded || 0} 成功 / ${(dsh.failed || 0) + (dsh.timed_out || 0)} 失败`,
+      sub: `运行中:${dsh.running || 0} · 排队:${dsh.queued || 0} · 超时:${dsh.timed_out || 0}`,
+    },
+    {
+      title: '企业成员与群聊分布',
+      val: `${uc.total || 0} 人 / ${gc.total || 0} 群`,
+      sub: `管理 ${uc.admin || 0} · 员工 ${uc.employee || 0} · 内部群 ${gc.internal || 0} · 客户群 ${gc.client_group || 0}`,
+    },
+    {
+      title: 'Workspace 存储占用',
+      val: fmtBytes(s.workspace_bytes),
+      sub: `留存 ${s.workspace_file_retention_days || 15} 天 · ${s.data_directory || '-'}`,
+    },
+    {
+      title: '待补齐能力缺口',
+      val: `${s.open_capability_gaps || 0} 项`,
+      sub: (s.bot_behavior?.ambient_listen_enabled ? `群旁听已开 (${s.bot_behavior?.ambient_cooldown_seconds || 90}s 遇冷触发)` : '群旁听未开启'),
+    },
+  ];
+  $('metrics').innerHTML = cards.map(c =>
+    `<div class="metric"><b>${esc(c.title)}</b><div class="val">${esc(c.val)}</div><div class="sub">${esc(c.sub)}</div></div>`
+  ).join('');
+}
+
+function renderDshTables(s) {
+  const renderRows = (rows, emptyMsg) => {
+    if (!rows.length) return `<p class="muted" style="margin:6px 0">${esc(emptyMsg)}</p>`;
+    return `<div class="table-wrap"><table><thead><tr><th>Execution ID</th><th>工作项</th><th>Workspace</th><th>状态</th><th>最近更新</th><th></th></tr></thead><tbody>${rows.map(r =>
+      `<tr><td><code>${esc(r.execution_id)}</code></td><td><code>${esc(r.work_item_id)}</code></td><td><code>${esc(r.workspace_id || '-')}</code></td><td>${chip(r.status, r.status)}</td><td>${esc(fmtTime(r.updated_at))}</td><td><button class="sm" data-open-log-ws="${esc(r.workspace_id || '')}" data-open-log-exec="${esc(r.execution_id)}">查看日志</button></td></tr>`
+    ).join('')}</tbody></table></div>`;
+  };
+  $('activeDsh').innerHTML = renderRows(s.active_dsh || [], '当前没有排队或执行中的 DSH 任务。');
+  $('recentDsh').innerHTML = renderRows(s.recent_dsh || [], '暂无 DSH 执行记录。');
+  const picker = $('logExecPicker');
+  const prev = picker.value;
+  picker.innerHTML = '<option value="">从近期执行中选择…</option>' + (s.recent_dsh || []).map(r =>
+    `<option value="${esc(r.workspace_id || '')}::${esc(r.execution_id)}">[${esc(r.status)}] ${esc(r.execution_id)} · ${esc(r.workspace_id || '-')}</option>`
+  ).join('');
+  if (prev && [...picker.options].some(o => o.value === prev)) picker.value = prev;
+}
+
+function renderConversations() {
+  const list = $('conversationList');
+  const q = ($('convSearch').value || '').trim().toLowerCase();
+  const filtered = state.conversations.filter(c => {
+    if (state.convTierFilter !== 'all') {
+      if (state.convTierFilter === 'direct' && c.source_type !== 'qq.c2c') return false;
+      if (state.convTierFilter === 'internal' && !['internal', 'admin'].includes(c.group_tier)) return false;
+      if (state.convTierFilter === 'client_group' && c.group_tier !== 'client_group') return false;
+    }
+    if (!q) return true;
+    const text = [c.label, c.source_id, c.workspace_id, ...(c.messages || []).map(m => `${m.actor_display_name} ${m.content}`)].join(' ').toLowerCase();
+    return text.includes(q);
+  });
+  if (!filtered.length) {
+    list.innerHTML = '<div class="empty">暂无匹配的会话</div>';
+    if (!state.conversations.length) {
+      $('chatHeader').innerHTML = '<div><strong>暂无会话</strong><small>收到 QQ 消息后会展示在这里</small></div>';
+      $('chatMessages').innerHTML = '<div class="empty">暂无消息记录</div>';
+    }
+    return;
+  }
+  if (!state.selectedConversationId || !filtered.some(x => x.conversation_id === state.selectedConversationId)) {
+    state.selectedConversationId = filtered[0].conversation_id;
+  }
+  list.innerHTML = filtered.map(c => {
+    const last = [...(c.messages || [])].reverse().find(x => x.kind === 'user') || c.messages?.[c.messages.length - 1];
+    return `<button class="conversation-item ${c.conversation_id === state.selectedConversationId ? 'active' : ''}" data-conversation="${esc(c.conversation_id)}">
+      <div class="conversation-title"><span>${esc(c.label)}</span>${chip(last?.status || '', last?.status_label || '')}</div>
+      <div class="conversation-sub">${tierChip(c.group_tier, c.tier_label)}${c.workspace_id ? `<code>${esc(c.workspace_id)}</code>` : ''}</div>
+      <div class="conversation-preview">${esc(last?.content || '')}</div>
+      <small>${esc(fmtTime(c.last_activity_at))}</small>
+    </button>`;
+  }).join('');
+  const current = filtered.find(x => x.conversation_id === state.selectedConversationId);
+  renderConversation(current);
+}
+
+function renderConversation(conversation) {
+  if (!conversation) return;
+  $('chatHeader').innerHTML = `
+    <div>
+      <strong>${esc(conversation.label)}</strong>
+      <div class="bar" style="margin:2px 0 0">
+        ${tierChip(conversation.group_tier, conversation.tier_label)}
+        ${conversation.workspace_id ? `<span class="small muted">沙箱工作区: <code>${esc(conversation.workspace_id)}</code></span>` : ''}
+        <span class="small muted">会话 ID: <code>${esc(conversation.conversation_id)}</code></span>
+      </div>
+    </div>
+    <button class="sm" id="chatReloadBtn">刷新消息</button>`;
+  const reloadBtn = $('chatReloadBtn');
+  if (reloadBtn) reloadBtn.onclick = () => loadConversations().catch(e => showToast(e.message, 'err'));
+  $('chatMessages').innerHTML = (conversation.messages || []).map(m => `
+    <button class="message ${esc(m.kind)}" data-event-id="${esc(m.event_id)}">
+      <div class="message-meta">
+        <strong>${esc(m.actor_display_name || m.actor_id)}</strong>
+        ${roleChip(m.actor_role)}
+        <span>${esc(fmtTime(m.occurred_at))}</span>
+        ${chip(m.status, m.status_label)}
+      </div>
+      <div class="message-body">${esc(m.content || '(附件)')}</div>
+      ${(m.attachments || []).map(a => `<span class="message-attachment">📎 ${esc(a.filename || a.name || '未命名')} · ${esc(a.status || '已收到')}</span>`).join('')}
+    </button>`).join('') || '<div class="empty">暂无消息</div>';
+}
+
+async function loadConversations() {
+  const data = await api('/api/conversations?limit=60');
+  state.conversations = data.conversations || [];
+  renderConversations();
+}
+
+async function openTrace(eventId) {
+  try {
+    const x = await api('/api/message-trace?event_id=' + encodeURIComponent(eventId));
+    const latestExec = x.executions && x.executions.length ? x.executions[x.executions.length - 1] : null;
+    const wsId = latestExec?.workspace_id || x.workspace_id || '';
+    const logBtn = (latestExec && wsId)
+      ? `<button class="sm primary" data-open-log-ws="${esc(wsId)}" data-open-log-exec="${esc(latestExec.execution_id)}">打开执行日志</button>`
+      : '';
+    $('detailContent').innerHTML = `
+      <h2>消息链路详情</h2>
+      <div class="detail-subtitle">
+        <span>${esc(fmtTime(x.occurred_at))}</span>
+        ${tierChip(x.group_tier, x.tier_label)}
+        ${roleChip(x.actor_role)}
+        ${chip(x.status, x.status_label)}
+      </div>
+      ${x.error ? `<div class="toast show err" style="margin-bottom:10px"><span>失败原因：${esc(x.error)}</span></div>` : ''}
+      <div class="detail-section">
+        <b>发送者与消息内容</b>（${esc(x.actor_display_name || x.actor_id)}）
+        <p class="message-body" style="margin:6px 0 0">${esc(x.content || '(附件)')}</p>
+        ${(x.attachments || []).map(a => `<span class="message-attachment">📎 ${esc(a.filename || a.name || '未命名')} · ${esc(a.status || '已收到')}</span>`).join('')}
+      </div>
+      <div class="detail-section">
+        <b>处理时间线</b>
+        <div class="timeline">${(x.timeline || []).map(t => `<div class="timeline-item"><div class="timeline-time">${esc(fmtTime(t.created_at))}</div><div class="timeline-label">${esc(t.label)}</div></div>`).join('') || '<div class="muted">暂无处理记录</div>'}</div>
+      </div>
+      <div class="detail-section">
+        <div class="bar" style="margin:0 0 8px;justify-content:space-between"><b>关联执行与沙箱对象</b>${logBtn}</div>
+        <div class="id-grid">
+          <span>消息 ID</span><code>${esc(x.event_id)}</code>
+          <span>Work Item</span><code>${esc(x.work_item?.work_item_id || '未创建')}</code>
+          <span>Execution</span><code>${esc((x.executions || []).map(e => e.execution_id).join(', ') || '未创建')}</code>
+          <span>Workspace</span><code>${esc(wsId || '未分配')}</code>
+          <span>回复投递</span><code>${esc((x.outbox || []).map(o => `${o.kind}:${o.status}`).join(', ') || '未生成')}</code>
+        </div>
+      </div>`;
+    $('detailBackdrop').classList.add('open');
+  } catch (e) {
+    showToast(e.message, 'err');
+  }
+}
+
+function closeTrace() {
+  $('detailBackdrop').classList.remove('open');
+}
+
+function roleLabelText(r) {
+  return r === 'admin' ? '管理员 L3' : r === 'employee' ? '员工 L2' : '客户 L1';
+}
+
+function renderUsersSection(uData, bindings) {
+  const users = uData.users || [];
+  if (uData.qq_app_id && !$('account').value.trim()) {
+    $('account').value = uData.qq_app_id;
+  }
+  if (!$('userTable').contains(document.activeElement)) {
+    if (!users.length) {
+      $('userTable').innerHTML = '<p class="muted">暂无已建成员，请在上方创建管理员或企业员工。</p>';
+    } else {
+      $('userTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>名称</th><th>当前角色</th><th>时区</th><th>用户 ID</th><th>绑定码</th></tr></thead><tbody>${users.map(u => `
+        <tr>
+          <td><strong>${esc(u.display_name)}</strong></td>
+          <td>
+            <select data-user-role-id="${esc(u.user_id)}">
+              <option value="customer" ${u.role === 'customer' ? 'selected' : ''}>客户 (L1)</option>
+              <option value="employee" ${u.role === 'employee' ? 'selected' : ''}>企业员工 (L2)</option>
+              <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>企业管理员 (L3)</option>
+            </select>
+          </td>
+          <td>${esc(u.time_zone)}</td>
+          <td><code>${esc(u.user_id)}</code></td>
+          <td><button class="sm primary" data-bind-code-user="${esc(u.user_id)}">生成 /bind 绑定码</button></td>
+        </tr>`).join('')}</tbody></table></div>`;
+    }
+  }
+
+  $('userId').innerHTML = users.length
+    ? users.map(x => `<option value="${esc(x.user_id)}">${esc(x.display_name)} (${esc(roleLabelText(x.role))})</option>`).join('')
+    : '<option value="">请先创建企业成员</option>';
+
+  const seen = uData.seen_external_actors || [];
+  if (!seen.length) {
+    $('seenActorsTable').innerHTML = '<p class="muted">暂无最近活跃 QQ 发送者记录。</p>';
+  } else {
+    $('seenActorsTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>来源</th><th>外部 OpenID</th><th>作用域</th><th>当前关联账号</th><th>最近消息时间</th><th></th></tr></thead><tbody>${seen.map(a => `
+      <tr>
+        <td>${esc(a.source_type === 'qq.group' ? 'QQ 群 ' + a.source_id.slice(0, 10) : 'QQ 私聊')}</td>
+        <td><code>${esc(a.external_id)}</code></td>
+        <td><code>${esc(a.scope_id)}</code></td>
+        <td>${a.resolved_user_id ? `<strong>${esc(a.resolved_name)}</strong> ${roleChip(a.resolved_role)}` : '<span class="chip">未绑定</span>'}</td>
+        <td>${esc(fmtTime(a.last_seen_at))}</td>
+        <td><button class="sm" data-fill-account="${esc(a.account_id)}" data-fill-scope="*" data-fill-ext="${esc(a.external_id)}">填入绑定表</button></td>
+      </tr>`).join('')}</tbody></table></div>`;
+  }
+
+  const usersById = Object.fromEntries(users.map(u => [u.user_id, u]));
+  if (!bindings.length) {
+    $('bindingTable').innerHTML = '<p class="muted">暂无绑定记录</p>';
+  } else {
+    $('bindingTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>平台</th><th>机器人 AppID</th><th>作用域</th><th>外部 OpenID</th><th>关联成员</th><th></th></tr></thead><tbody>${bindings.map(b => {
+      const targetUser = usersById[b.user_id];
+      return `<tr><td>${esc(b.provider)}</td><td><code>${esc(b.account_id)}</code></td><td><code>${esc(b.scope_id)}</code></td><td><code>${esc(b.external_id)}</code></td><td>${targetUser ? `<strong>${esc(targetUser.display_name)}</strong> ${roleChip(targetUser.role)}` : `<code>${esc(b.user_id)}</code>`}</td><td><button class="sm danger" data-unbind-id="${esc(b.binding_id)}">解绑</button></td></tr>`;
+    }).join('')}</tbody></table></div>`;
+  }
+}
+
+function renderGroupsAndKnowledge(groups, kData, globalCompat) {
+  $('compatBanner').className = `chip ${globalCompat ? 'l2' : 'warn'}`;
+  $('compatBanner').textContent = globalCompat ? '全局向下兼容：开启 (L2 自动可读 L1)' : '全局向下兼容：关闭 (严格隔离，需显式分享)';
+
+  if (!$('groupTable').contains(document.activeElement)) {
+    if (!groups.length) {
+      $('groupTable').innerHTML = '<p class="muted">尚未发现 QQ 群，机器人收到群消息后会自动登记在这里。</p>';
+    } else {
+      $('groupTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>群显示名称</th><th>群 OpenID</th><th>群层级 (Tier)</th><th>向下兼容策略</th><th>备注</th><th>最近活跃</th><th></th></tr></thead><tbody>${groups.map(g => `
+        <tr data-group-row="${esc(g.source_id)}">
+          <td><input class="g-name" value="${esc(g.display_name)}" placeholder="输入群备注名"></td>
+          <td><code>${esc(g.source_id)}</code></td>
+          <td>
+            <select class="g-tier">
+              <option value="client_group" ${g.tier === 'client_group' ? 'selected' : ''}>客户群 (L1 隔离)</option>
+              <option value="internal" ${g.tier === 'internal' ? 'selected' : ''}>内部群 (L2 共享)</option>
+            </select>
+          </td>
+          <td>
+            <select class="g-compat">
+              <option value="inherit" ${g.downward_compat === 'inherit' ? 'selected' : ''}>继承全局</option>
+              <option value="on" ${g.downward_compat === 'on' ? 'selected' : ''}>强制开启 (on)</option>
+              <option value="off" ${g.downward_compat === 'off' ? 'selected' : ''}>强制关闭 (off)</option>
+            </select>
+          </td>
+          <td><input class="g-notes" value="${esc(g.notes || '')}" placeholder="备注（可选）"></td>
+          <td><small>${esc(fmtTime(g.updated_at))}</small></td>
+          <td><button class="sm primary" data-save-group="${esc(g.source_id)}">保存</button></td>
+        </tr>`).join('')}</tbody></table></div>`;
+    }
+  }
+
+  const preset = $('shareScopePreset');
+  const prevPreset = preset.value;
+  const presetOptions = [
+    '<option value="">快捷选择目标位置…</option>',
+    '<option value="internal::company">企业内部共享知识库 (internal:company)</option>',
+    ...groups.map(g => `<option value="group::${esc(g.source_id)}">${g.tier === 'internal' ? '[内部群]' : '[客户群]'} ${esc(g.display_name || g.source_id)}</option>`),
+    ...state.conversations.filter(c => c.source_type === 'qq.c2c').map(c =>
+      `<option value="direct::${esc(c.conversation_id)}">[私聊] ${esc(c.label)}</option>`
+    ),
+  ];
+  preset.innerHTML = presetOptions.join('');
+  if (prevPreset && [...preset.options].some(o => o.value === prevPreset)) preset.value = prevPreset;
+
+  updateShareItemSelect();
+
+  const shares = kData.shares || [];
+  const docNameMap = Object.fromEntries((kData.items || []).map(d => [d.document_id, d.canonical_filename]));
+  const attNameMap = Object.fromEntries((kData.attachments || []).map(a => [a.attachment_id, a.filename]));
+  if (!shares.length) {
+    $('shareTable').innerHTML = '<p class="muted">暂无显式跨区授权规则。</p>';
+  } else {
+    $('shareTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>类型</th><th>文件名称</th><th>授权给目标位置</th><th>备注</th><th>创建时间</th><th></th></tr></thead><tbody>${shares.map(sh => {
+      const name = sh.target_kind === 'document' ? (docNameMap[sh.target_id] || sh.target_id.slice(0, 14)) : (attNameMap[sh.target_id] || sh.target_id.slice(0, 14));
+      return `<tr><td>${esc(sh.target_kind === 'document' ? '文档' : '附件')}</td><td><strong>${esc(name)}</strong><br><small><code>${esc(sh.target_id.slice(0, 16))}</code></small></td><td>${scopeBadge(sh.target_scope_type, sh.target_scope_id)}</td><td>${esc(sh.note || '-')}</td><td><small>${esc(fmtTime(sh.created_at))}</small></td><td><button class="sm danger" data-unshare-id="${esc(sh.share_id)}">撤销</button></td></tr>`;
+    }).join('')}</tbody></table></div>`;
+  }
+
+  const docs = kData.items || [];
+  if (!docs.length) {
+    $('docsTable').innerHTML = '<p class="muted">暂无已入库文档。</p>';
+  } else {
+    $('docsTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>文档名</th><th>归属来源</th><th>状态</th><th></th></tr></thead><tbody>${docs.map(d => `
+      <tr>
+        <td><strong>${esc(d.canonical_filename)}</strong><br><small>${esc(fmtBytes(d.size_bytes))} · <code>${esc(d.document_id.slice(0, 12))}</code></small></td>
+        <td>${(d.scopes || []).map(sc => scopeBadge(sc.scope_type, sc.scope_id)).join(' ') || '<span class="muted">-</span>'}</td>
+        <td>${chip(d.status, d.status)}</td>
+        <td><button class="sm" data-pick-share-kind="document" data-pick-share-id="${esc(d.document_id)}">分享</button></td>
+      </tr>`).join('')}</tbody></table></div>`;
+  }
+
+  const atts = kData.attachments || [];
+  if (!atts.length) {
+    $('attachmentsTable').innerHTML = '<p class="muted">暂无附件记录。</p>';
+  } else {
+    $('attachmentsTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>附件名</th><th>归属</th><th>状态</th><th></th></tr></thead><tbody>${atts.slice(0, 30).map(a => `
+      <tr>
+        <td><strong>${esc(a.filename)}</strong>${a.sensitive ? ' <span class="chip failed">敏感</span>' : ''}<br><small>${esc(fmtBytes(a.size_bytes))} · ${esc(fmtTime(a.received_at))}</small></td>
+        <td>${scopeBadge(a.scope_type, a.scope_id)}</td>
+        <td>${chip(a.status, a.status)}</td>
+        <td><button class="sm" data-pick-share-kind="attachment" data-pick-share-id="${esc(a.attachment_id)}">分享</button></td>
+      </tr>`).join('')}</tbody></table></div>`;
+  }
+}
+
+function updateShareItemSelect() {
+  const k = state.knowledgeData || { items: [], attachments: [] };
+  const kind = $('shareTargetKind').value;
+  const sel = $('shareDocId');
+  const prev = sel.value;
+  if (kind === 'attachment') {
+    const atts = k.attachments || [];
+    sel.innerHTML = atts.length
+      ? atts.map(a => `<option value="${esc(a.attachment_id)}">${esc(a.filename)} (${esc(a.status)} · ${esc(a.attachment_id.slice(0, 10))})</option>`).join('')
+      : '<option value="">暂无附件</option>';
+  } else {
+    const docs = k.items || [];
+    sel.innerHTML = docs.length
+      ? docs.map(d => `<option value="${esc(d.document_id)}">${esc(d.canonical_filename)} (${esc(d.status)} · ${esc(d.document_id.slice(0, 10))})</option>`).join('')
+      : '<option value="">暂无文档</option>';
+  }
+  if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+function renderToolsSummary(summary) {
+  const layers = summary.layers || {};
+  $('toolsSummaryTable').innerHTML = ['common', 'internal'].map(layer => {
+    const d = layers[layer] || {};
+    const badge = layer === 'common'
+      ? '<span class="chip done">公共层 common · 全区可用</span>'
+      : '<span class="chip l2">内部层 internal · 客户群不可见</span>';
+    const pkgs = (d.packages || []).map(p => `<span class="chip">${esc(p.spec)}</span>`).join(' ') || '<span class="muted">暂无</span>';
+    const distCount = (d.installed_dists || []).length;
+    const scriptsHtml = (d.scripts || []).length
+      ? `<ul class="script-list">${(d.scripts || []).map(s => `
+          <li>
+            <div><code>${esc(s.name)}</code> <small>(${esc(fmtBytes(s.bytes))})</small>${s.description ? ` — <span class="muted">${esc(s.description)}</span>` : ''}</div>
+            <div style="display:flex;gap:6px">
+              <button class="sm" data-edit-tool-layer="${esc(layer)}" data-edit-tool-name="${esc(s.name)}">编辑</button>
+              <button class="sm danger" data-del-tool-layer="${esc(layer)}" data-del-tool-name="${esc(s.name)}">删除</button>
+            </div>
+          </li>`).join('')}</ul>`
+      : '<p class="muted" style="margin:6px 0 0">暂无自定义脚本</p>';
+    return `
+      <div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:#fbfcfb">
+        <div class="bar" style="margin:0 0 8px;justify-content:space-between">${badge}<small>Python 分发包: ${distCount}</small></div>
+        <div class="small muted" style="margin-bottom:6px">路径: <code>${esc(d.path || '-')}</code></div>
+        <div style="margin-bottom:8px"><strong style="font-size:13px">已安装组件：</strong>${pkgs}</div>
+        <div><strong style="font-size:13px">可执行脚本 (<code>bin/</code>)：</strong>${scriptsHtml}</div>
+      </div>`;
+  }).join('');
+}
+
+function mcpAccessBadge(level) {
+  if (level === 'common') return '<span class="chip done">全部对话 (common)</span>';
+  if (level === 'internal') return '<span class="chip l2">内部群+管理员 (internal)</span>';
+  return '<span class="chip warn">仅管理员 (admin)</span>';
+}
+
+function renderMcpServers(servers) {
+  state.mcpServers = servers || [];
+  const enabledCount = state.mcpServers.filter(s => s.enabled).length;
+  $('mcpCountBadge').textContent = `${enabledCount}/${state.mcpServers.length} 已启用`;
+  $('mcpCountBadge').className = `chip ${enabledCount ? 'done' : ''}`;
+  if (!state.mcpServers.length) {
+    $('mcpServersTable').innerHTML = '<p class="muted">暂未配置受控 MCP 服务。</p>';
+    return;
+  }
+  $('mcpServersTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>服务 ID</th><th>权限范围</th><th>传输模式</th><th>用途说明与目标</th><th>密钥环境变量</th><th>状态</th><th>操作</th></tr></thead><tbody>${state.mcpServers.map(s => {
+    const targetText = s.transport === 'stdio'
+      ? `${s.command || ''}${Array.isArray(s.args) && s.args.length ? ' ' + s.args.join(' ') : ''}`
+      : (s.url || '');
+    const refs = Array.isArray(s.referenced_secret_vars) ? s.referenced_secret_vars : [];
+    const missing = new Set(Array.isArray(s.missing_secret_vars) ? s.missing_secret_vars : []);
+    const secretText = refs.length
+      ? refs.map(v => missing.has(v) ? `<span class="chip failed">${esc(v)} (未配置)</span>` : `<span class="chip done">${esc(v)}</span>`).join(' ')
+      : '<span class="muted">无密钥引用</span>';
+    const canDel = s.source === 'console' || s.source === 'runtime+override';
+    const delLabel = s.source === 'runtime+override' ? '恢复默认' : '删除';
+    return `
+      <tr>
+        <td><code>${esc(s.server_id)}</code><br><small class="muted">${esc(s.source || 'runtime')}</small></td>
+        <td>${mcpAccessBadge(s.access_level)}</td>
+        <td><code>${esc(s.transport)}</code></td>
+        <td>${esc(s.description || '—')}<br><small class="muted"><code>${esc(targetText)}</code></small></td>
+        <td>${secretText}</td>
+        <td>${chip(s.enabled ? '已启用' : '已停用', s.enabled ? 'done' : 'failed')}</td>
+        <td style="white-space:nowrap">
+          <button class="sm" data-mcp-toggle="${esc(s.server_id)}">${s.enabled ? '停用' : '启用'}</button>
+          <button class="sm" data-mcp-edit="${esc(s.server_id)}">载入编辑</button>
+          ${canDel ? `<button class="sm danger" data-mcp-del="${esc(s.server_id)}">${delLabel}</button>` : ''}
+        </td>
+      </tr>`;
+  }).join('')}</tbody></table></div>`;
+}
+
+function renderSchedules(tasks) {
+  if (!tasks.length) {
+    $('scheduleTable').innerHTML = '<p class="muted">暂无定时任务</p>';
+    return;
+  }
+  $('scheduleTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>任务 ID</th><th>UTC 执行时间</th><th>状态</th><th>工作项</th><th>续接提示</th><th></th></tr></thead><tbody>${tasks.map(t => `
+    <tr>
+      <td><code>${esc(t.schedule_id)}</code></td>
+      <td>${esc(t.due_at)}</td>
+      <td>${chip(t.status, t.status)}</td>
+      <td><code>${esc(t.payload?.work_item_id || '-')}</code></td>
+      <td>${esc(t.payload?.resume_prompt || '')}</td>
+      <td>${t.status === 'failed'
+        ? `<button class="sm primary" data-sched-retry="${esc(t.schedule_id)}">重试</button>`
+        : (t.status === 'scheduled' ? `<button class="sm danger" data-sched-cancel="${esc(t.schedule_id)}">取消</button>` : '')}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+function gapKindLabel(kind) {
+  const m = {
+    tool_script: '缺业务脚本/工具',
+    python_package: '缺 Python 依赖包',
+    knowledge_access: '缺知识库/文档授权',
+    external_api: '缺外部系统/接口',
+    other: '其他能力提升',
+  };
+  return m[kind] || kind || '能力提升';
+}
+
+function renderCapabilityGaps() {
+  const rows = state.gaps.filter(g => state.gapStatusFilter === 'all' || g.status === state.gapStatusFilter);
+  const openCount = state.gaps.filter(g => g.status === 'open').length;
+  const badge = $('gapNavBadge');
+  badge.textContent = String(openCount);
+  badge.style.display = openCount > 0 ? '' : 'none';
+  if (!rows.length) {
+    $('gapTable').innerHTML = '<p class="muted">当前筛选条件下暂无群聊能力缺口记录。</p>';
+    return;
+  }
+  $('gapTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>发现时间 / 来源</th><th>群聊核心话题与痛点</th><th>缺少的能力 / 权限</th><th>补齐后 AI 可解决的问题（建议方案）</th><th>状态与操作</th></tr></thead><tbody>${rows.map(g => {
+    const srcLabel = g.group_display_name ? `${g.group_display_name} (${g.source_id.slice(0, 8)})` : g.source_id.slice(0, 14);
+    const jumpBtn = g.gap_kind === 'knowledge_access'
+      ? '<button class="sm" data-jump-tab="groups">去配置授权</button>'
+      : '<button class="sm" data-jump-tab="tools">去配共享工具</button>';
+    const actions = g.status === 'open'
+      ? `${jumpBtn}<button class="sm primary" data-gap-action="resolved" data-gap-id="${esc(g.gap_id)}">标记已补齐</button><button class="sm" data-gap-action="dismissed" data-gap-id="${esc(g.gap_id)}">忽略</button>`
+      : `<button class="sm" data-gap-action="open" data-gap-id="${esc(g.gap_id)}">重新打开</button>`;
+    return `<tr>
+      <td><small>${esc(fmtTime(g.created_at))}</small><br>${tierChip(g.group_tier, g.tier_label)}<br><code>${esc(srcLabel)}</code></td>
+      <td><strong>${esc(g.topic)}</strong><br><small>${esc(g.summary)}</small></td>
+      <td><span class="chip warn">${esc(gapKindLabel(g.gap_kind))}</span><br><div style="margin-top:4px"><code>${esc(g.missing_capability)}</code></div></td>
+      <td><div style="color:#164f3b;font-weight:500">${esc(g.suggested_solution)}</div>${g.resolution_note ? `<div class="small muted" style="margin-top:4px">处理备注：${esc(g.resolution_note)}</div>` : ''}</td>
+      <td>${chip(g.status === 'resolved' ? 'completed' : g.status, g.status === 'open' ? '待处理' : g.status === 'resolved' ? '已补齐' : '已忽略')}<div class="bar" style="margin:6px 0 0">${actions}</div></td>
+    </tr>`;
+  }).join('')}</tbody></table></div>`;
+}
+
+function renderAuditLogs() {
+  const filterType = $('logTypeFilter').value;
+  const search = ($('logSearch').value || '').trim().toLowerCase();
+  const rows = state.logs.filter(r => {
+    if (filterType && r.entity_type !== filterType) return false;
+    if (!search) return true;
+    return [r.entity_type, r.action, r.label, r.entity_id, JSON.stringify(r.payload)].join(' ').toLowerCase().includes(search);
+  });
+  if (!rows.length) {
+    $('logTable').innerHTML = '<p class="muted">暂无符合条件的审计记录</p>';
+    return;
+  }
+  $('logTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>时间</th><th>类型</th><th>操作摘要</th><th>记录 ID</th><th>详情</th></tr></thead><tbody>${rows.map(r => `
+    <tr>
+      <td><small>${esc(fmtTime(r.created_at))}</small></td>
+      <td><span class="chip">${esc(r.entity_type)}</span></td>
+      <td><strong>${esc(r.label || r.action)}</strong><br><small class="muted">${esc(r.action)}</small></td>
+      <td><code>${esc(r.entity_id)}</code></td>
+      <td><small><code>${esc(JSON.stringify(r.payload))}</code></small></td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+async function refresh() {
+  if (!apiToken()) return;
+  try {
+    const s = await api('/api/status');
+    state.status = s;
+    state.qqAppId = s.qq_app_id || '';
+    $('status').textContent = '在线';
+    $('connDot').className = 'dot ok';
+    $('releaseBadge').textContent = `版本: ${s.release_id || 'source'}`;
+    $('compatHeaderPill').textContent = `向下兼容: ${s.downward_compatibility_enabled ? '开启' : '关闭'}`;
+    $('disconnectBtn').style.display = '';
+    $('refreshNowBtn').style.display = '';
+
+    renderServices(s);
+    renderMetrics(s);
+    renderDshTables(s);
+
+    const [conv, u, b, t, w, l, g, dc, k, tools, mcpData, gapsData, botCfg, wsFiles, retentionCfg] = await Promise.all([
+      api('/api/conversations?limit=60'),
+      api('/api/users'),
+      api('/api/bindings'),
+      api('/api/schedules'),
+      api('/api/settings/web-search'),
+      api('/api/logs?limit=150'),
+      api('/api/groups'),
+      api('/api/settings/downward-compat'),
+      api('/api/knowledge'),
+      api('/api/tools'),
+      api('/api/mcp-servers'),
+      api('/api/capability-gaps?limit=200'),
+      api('/api/settings/bot-behavior'),
+      api('/api/workspace-files?limit=150'),
+      api('/api/settings/file-retention'),
+    ]);
+    state.conversations = conv.conversations || [];
+    state.usersData = u;
+    state.groups = g.groups || [];
+    state.knowledgeData = k;
+    state.gaps = gapsData.gaps || [];
+    state.logs = l.logs || [];
+
+    renderConversations();
+    renderUsersSection(u, b.bindings || []);
+    renderGroupsAndKnowledge(state.groups, k, Boolean(dc.enabled));
+    renderWorkspaceFiles(wsFiles.files || [], retentionCfg.retention_days ?? wsFiles.retention_days ?? 15);
+    renderToolsSummary(tools);
+    renderMcpServers(mcpData.servers || []);
+    renderCapabilityGaps();
+    renderSchedules(t.tasks || []);
+    renderAuditLogs();
+
+    $('dssuperagentWebEnabled').checked = Boolean(w.dssuperagent_enabled);
+    $('dshWebEnabled').checked = Boolean(w.dsh_enabled);
+    $('downwardCompatEnabled').checked = Boolean(dc.enabled);
+    $('dssWebBadge').textContent = w.dssuperagent_enabled ? '已开启' : '已关闭';
+    $('dssWebBadge').className = `chip ${w.dssuperagent_enabled ? 'done' : ''}`;
+    $('dshWebBadge').textContent = w.dsh_enabled ? '已开启' : '已关闭';
+    $('dshWebBadge').className = `chip ${w.dsh_enabled ? 'done' : ''}`;
+    $('compatBadge').textContent = dc.enabled ? '已开启' : '已关闭';
+    $('compatBadge').className = `chip ${dc.enabled ? 'l2' : 'warn'}`;
+    if (!$('botBehaviorCard').contains(document.activeElement)) {
+      $('ambientListenEnabled').checked = Boolean(botCfg.ambient_listen_enabled);
+      $('ambientCooldownSeconds').value = String(botCfg.ambient_cooldown_seconds ?? 300);
+      $('botAliasesInput').value = (botCfg.bot_aliases || []).join(', ');
+    }
+    const rDays = Number(retentionCfg.retention_days ?? 15);
+    if (!$('retentionSettingsCard').contains(document.activeElement)) {
+      $('retentionDaysInput').value = String(rDays);
+    }
+    $('retentionBadge').textContent = `保留 ${rDays} 天`;
+    $('retentionBadge').className = 'chip done';
+    $('ambientBadge').textContent = botCfg.ambient_listen_enabled ? `旁听已开 (${botCfg.ambient_cooldown_seconds}s)` : '仅直达回复';
+    $('ambientBadge').className = `chip ${botCfg.ambient_listen_enabled ? 'done' : ''}`;
+  } catch (e) {
+    $('status').textContent = '连接异常';
+    $('connDot').className = 'dot err';
+    showToast(e.message, 'err');
+  }
+}
+
+async function runAction(fn, okMsg) {
+  try {
+    await fn();
+    if (okMsg) showToast(okMsg, 'ok');
+    await refresh();
+  } catch (e) {
+    showToast(e.message, 'err');
+  }
+}
+
+async function saveToggle(path, checkboxEl, okMsg) {
+  const prev = !checkboxEl.checked;
+  checkboxEl.disabled = true;
+  try {
+    const saved = await api(path, 'PUT', { enabled: checkboxEl.checked });
+    checkboxEl.checked = Boolean(saved.enabled);
+    showToast(okMsg, 'ok');
+    await refresh();
+  } catch (e) {
+    checkboxEl.checked = prev;
+    showToast('设置保存失败：' + e.message, 'err');
+  } finally {
+    checkboxEl.disabled = false;
+  }
+}
+
+async function loadScheduleSources() {
+  const x = await api('/api/schedule-sources');
+  $('sourceEvent').innerHTML = (x.events || []).map(e =>
+    `<option value="${esc(e.event_id)}">${esc(e.event_id.slice(0, 18))} · ${esc(e.content)}</option>`
+  ).join('');
+  $('workItem').innerHTML = (x.work_items || []).map(w =>
+    `<option value="${esc(w.work_item_id)}">${esc(w.title)} · ${esc(w.status)}</option>`
+  ).join('');
+}
+
+async function loadExecutionLogs(wsOverride, execOverride) {
+  const ws = (wsOverride ?? $('logWorkspace').value).trim();
+  const ex = (execOverride ?? $('logExecution').value).trim();
+  if (!ws || !ex) {
+    showToast('请先填写 Workspace ID 与 Execution ID', 'err');
+    return;
+  }
+  $('logWorkspace').value = ws;
+  $('logExecution').value = ex;
+  try {
+    const q = new URLSearchParams({ workspace_id: ws, execution_id: ex });
+    const logs = await api('/api/workspace-logs?' + q);
+    $('executionLogs').textContent = `=== STDOUT ===\n${logs.stdout || '(空)'}\n\n=== STDERR ===\n${logs.stderr || '(空)'}`;
+  } catch (e) {
+    showToast(e.message, 'err');
+  }
+}
+
+// Event bindings (no inline HTML onclick escaping pitfalls)
+$('toastClose').onclick = () => { $('toast').className = 'toast'; };
+$('detailCloseBtn').onclick = closeTrace;
+$('detailBackdrop').addEventListener('click', e => { if (e.target.id === 'detailBackdrop') closeTrace(); });
+
+$('connect').onclick = () => {
+  const tok = $('token').value.trim();
+  if (!tok) return showToast('请输入管理令牌', 'err');
+  sessionStorage.setItem('company-agent-token', tok);
+  refresh();
+};
+$('disconnectBtn').onclick = () => {
+  sessionStorage.removeItem('company-agent-token');
+  $('token').value = '';
+  $('status').textContent = '已断开';
+  $('connDot').className = 'dot';
+  $('disconnectBtn').style.display = 'none';
+  $('refreshNowBtn').style.display = 'none';
+};
+$('refreshNowBtn').onclick = () => refresh();
+$('overviewRefreshBtn').onclick = () => refresh();
+
+document.querySelectorAll('nav button').forEach(b => {
+  b.onclick = () => switchTab(b.dataset.tab);
+});
+
+$('convSearch').addEventListener('input', renderConversations);
+$('convTierFilters').addEventListener('click', e => {
+  const b = e.target.closest('button[data-tier]');
+  if (!b) return;
+  $('convTierFilters').querySelectorAll('button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  state.convTierFilter = b.dataset.tier;
+  renderConversations();
+});
+
+$('conversationList').addEventListener('click', e => {
+  const item = e.target.closest('[data-conversation]');
+  if (!item) return;
+  state.selectedConversationId = item.dataset.conversation;
+  renderConversations();
+});
+
+$('chatMessages').addEventListener('click', e => {
+  const item = e.target.closest('[data-event-id]');
+  if (item) openTrace(item.dataset.eventId);
+});
+
+$('createUserBtn').onclick = () => runAction(async () => {
+  await api('/api/users', 'POST', {
+    display_name: $('displayName').value,
+    time_zone: $('timezone').value || 'Asia/Shanghai',
+    role: $('userRole').value,
+  });
+  $('displayName').value = '';
+}, '成员创建成功');
+
+$('copyBindCodeBtn').onclick = async () => {
+  const text = $('bindCodeCommand').textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('已复制绑定指令：' + text, 'ok');
+  } catch {
+    showToast('请手动复制：' + text, 'info');
+  }
+};
+
+$('userTable').addEventListener('change', e => {
+  const sel = e.target.closest('select[data-user-role-id]');
+  if (!sel) return;
+  const uid = sel.dataset.userRoleId;
+  runAction(() => api('/api/users/role', 'PUT', { user_id: uid, role: sel.value }), '用户角色已更新');
+});
+
+$('userTable').addEventListener('click', async e => {
+  const btn = e.target.closest('button[data-bind-code-user]');
+  if (!btn) return;
+  try {
+    const res = await api('/api/bind-codes', 'POST', { user_id: btn.dataset.bindCodeUser });
+    $('bindCodeTitle').textContent = `已为「${res.display_name}」(${roleLabelText(res.role)}) 生成绑定码`;
+    $('bindCodeCommand').textContent = `/bind ${res.code}`;
+    $('bindCodeBox').classList.add('show');
+    showToast(`已生成 /bind ${res.code}`, 'ok');
+  } catch (err) {
+    showToast(err.message, 'err');
+  }
+});
+
+$('seenActorsTable').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-fill-ext]');
+  if (!btn) return;
+  $('account').value = btn.dataset.fillAccount || state.qqAppId || '';
+  $('scope').value = btn.dataset.fillScope || '*';
+  $('external').value = btn.dataset.fillExt || '';
+  showToast('已将 QQ 发送者填入下方绑定表单，请选择关联成员后点击确认绑定', 'info');
+});
+
+$('bindUserBtn').onclick = () => runAction(async () => {
+  await api('/api/bindings', 'POST', {
+    provider: $('provider').value,
+    account_id: $('account').value,
+    scope_id: $('scope').value || '*',
+    external_id: $('external').value,
+    user_id: $('userId').value,
+  });
+  $('external').value = '';
+}, '平台身份绑定成功');
+
+$('bindingTable').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-unbind-id]');
+  if (!btn) return;
+  runAction(() => api('/api/bindings?binding_id=' + encodeURIComponent(btn.dataset.unbindId), 'DELETE'), '已解除绑定');
+});
+
+$('groupTable').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-save-group]');
+  if (!btn) return;
+  const row = btn.closest('tr');
+  const sourceId = btn.dataset.saveGroup;
+  runAction(() => api('/api/groups', 'PUT', {
+    source_type: 'qq.group',
+    source_id: sourceId,
+    display_name: row.querySelector('.g-name').value,
+    tier: row.querySelector('.g-tier').value,
+    downward_compat: row.querySelector('.g-compat').value,
+    notes: row.querySelector('.g-notes').value,
+  }), '群配置已保存并立即生效');
+});
+
+$('shareTargetKind').onchange = updateShareItemSelect;
+$('shareScopePreset').onchange = () => {
+  const v = $('shareScopePreset').value;
+  if (!v) return;
+  const idx = v.indexOf('::');
+  if (idx > 0) {
+    $('shareTargetScopeType').value = v.slice(0, idx);
+    $('shareTargetScopeId').value = v.slice(idx + 2);
+  }
+};
+
+$('shareDocBtn').onclick = () => runAction(async () => {
+  await api('/api/knowledge/shares', 'POST', {
+    target_kind: $('shareTargetKind').value,
+    target_id: $('shareDocId').value,
+    target_scope_type: $('shareTargetScopeType').value,
+    target_scope_id: $('shareTargetScopeId').value,
+    note: $('shareNote').value,
+  });
+  $('shareNote').value = '';
+}, '跨区显式授权已添加');
+
+$('groups').addEventListener('click', e => {
+  const pick = e.target.closest('button[data-pick-share-id]');
+  if (pick) {
+    $('shareTargetKind').value = pick.dataset.pickShareKind;
+    updateShareItemSelect();
+    $('shareDocId').value = pick.dataset.pickShareId;
+    showToast('已选中待分享对象，请选择目标群或内部库后点击添加授权', 'info');
+    return;
+  }
+  const unshare = e.target.closest('button[data-unshare-id]');
+  if (unshare) {
+    runAction(() => api('/api/knowledge/shares?share_id=' + encodeURIComponent(unshare.dataset.unshareId), 'DELETE'), '已撤销分享授权');
+  }
+});
+
+document.querySelectorAll('button[data-pkg-preset]').forEach(btn => {
+  btn.onclick = () => { $('toolPackages').value = btn.dataset.pkgPreset; };
+});
+$('tplPyBtn').onclick = () => {
+  if (!$('toolScriptName').value.trim()) $('toolScriptName').value = 'helper.py';
+  $('toolScriptContent').value = '#!/usr/bin/env python3\nimport sys\n\ndef main():\n    print("Hello from shared tool:", sys.argv[1:])\n\nif __name__ == "__main__":\n    main()\n';
+};
+$('tplShBtn').onclick = () => {
+  if (!$('toolScriptName').value.trim()) $('toolScriptName').value = 'helper.sh';
+  $('toolScriptContent').value = '#!/bin/sh\nset -eu\necho "Hello from shared shell tool"\n';
+};
+
+$('installPkgBtn').onclick = async () => {
+  const btn = $('installPkgBtn');
+  const pkgs = $('toolPackages').value.trim();
+  if (!pkgs) return showToast('请输入需要安装的 Python 包名', 'err');
+  btn.disabled = true;
+  $('toolPkgStatus').textContent = '正在调用 pip install --target 安装组件（可能需要 10~60 秒）…';
+  try {
+    const res = await api('/api/tools/install', 'POST', { layer: $('toolLayerPkg').value, packages: pkgs });
+    $('toolPkgStatus').textContent = `安装成功 (${res.layer}): ${res.packages.join(', ')}`;
+    $('toolPackages').value = '';
+    showToast('Python 组件安装成功', 'ok');
+    await refresh();
+  } catch (e) {
+    $('toolPkgStatus').textContent = '安装失败：' + e.message;
+    showToast('组件安装失败：' + e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$('saveToolScriptBtn').onclick = () => runAction(() => api('/api/tools/scripts', 'POST', {
+  layer: $('toolLayerScript').value,
+  name: $('toolScriptName').value,
+  description: $('toolScriptDesc').value,
+  content: $('toolScriptContent').value,
+}), '脚本工具已保存并设为可执行');
+
+$('toolsSummaryTable').addEventListener('click', async e => {
+  const editBtn = e.target.closest('button[data-edit-tool-name]');
+  if (editBtn) {
+    try {
+      const s = await api(`/api/tools/script?layer=${encodeURIComponent(editBtn.dataset.editToolLayer)}&name=${encodeURIComponent(editBtn.dataset.editToolName)}`);
+      $('toolLayerScript').value = s.layer;
+      $('toolScriptName').value = s.name;
+      $('toolScriptDesc').value = s.description || '';
+      $('toolScriptContent').value = s.content || '';
+      showToast(`已载入脚本 ${s.name}`, 'info');
+    } catch (err) {
+      showToast(err.message, 'err');
+    }
+    return;
+  }
+  const delBtn = e.target.closest('button[data-del-tool-name]');
+  if (delBtn) {
+    const layer = delBtn.dataset.delToolLayer;
+    const name = delBtn.dataset.delToolName;
+    runAction(() => api(`/api/tools/scripts?layer=${encodeURIComponent(layer)}&name=${encodeURIComponent(name)}`, 'DELETE'), `已删除脚本 ${name}`);
+  }
+});
+
+$('mcpSaveBtn').onclick = () => runAction(async () => {
+  const serverId = $('mcpServerId').value.trim();
+  const transport = $('mcpTransport').value;
+  const targetRaw = $('mcpTargetInput').value.trim();
+  const refsRaw = $('mcpSecretRefInput').value.trim();
+  const refs = refsRaw ? JSON.parse(refsRaw) : {};
+  const body = {
+    server_id: serverId,
+    access_level: $('mcpAccessLevel').value,
+    transport,
+    description: $('mcpDescription').value.trim(),
+  };
+  if (transport === 'stdio') {
+    let parts = [];
+    if (targetRaw.startsWith('[')) {
+      parts = JSON.parse(targetRaw);
+    } else if (targetRaw) {
+      parts = targetRaw.split(/\s+/).filter(Boolean);
+    }
+    body.command = parts[0] || '';
+    body.args = parts.slice(1);
+    body.env_refs = refs;
+  } else {
+    body.url = targetRaw;
+    body.header_env_refs = refs;
+  }
+  await api('/api/mcp-servers', 'PUT', body);
+}, 'MCP 服务配置已保存');
+
+$('mcpServersTable').addEventListener('click', e => {
+  const toggleBtn = e.target.closest('button[data-mcp-toggle]');
+  if (toggleBtn) {
+    const id = toggleBtn.dataset.mcpToggle;
+    const srv = (state.mcpServers || []).find(item => item.server_id === id);
+    if (srv) {
+      runAction(() => api('/api/mcp-servers', 'PUT', { server_id: id, enabled: !srv.enabled }), `${id} 已${srv.enabled ? '停用' : '启用'}`);
+    }
+    return;
+  }
+  const editBtn = e.target.closest('button[data-mcp-edit]');
+  if (editBtn) {
+    const srv = (state.mcpServers || []).find(item => item.server_id === editBtn.dataset.mcpEdit);
+    if (srv) {
+      $('mcpServerId').value = srv.server_id;
+      $('mcpAccessLevel').value = srv.access_level || 'admin';
+      $('mcpTransport').value = srv.transport || 'stdio';
+      $('mcpDescription').value = srv.description || '';
+      if (srv.transport === 'stdio') {
+        const allParts = [srv.command || '', ...(srv.args || [])].filter(Boolean);
+        $('mcpTargetInput').value = allParts.some(p => /\s/.test(p)) ? JSON.stringify(allParts) : allParts.join(' ');
+        $('mcpSecretRefInput').value = srv.env_refs && Object.keys(srv.env_refs).length ? JSON.stringify(srv.env_refs) : '';
+      } else {
+        $('mcpTargetInput').value = srv.url || '';
+        $('mcpSecretRefInput').value = srv.header_env_refs && Object.keys(srv.header_env_refs).length ? JSON.stringify(srv.header_env_refs) : '';
+      }
+      showToast(`已载入 MCP 服务 ${srv.server_id}`, 'info');
+    }
+    return;
+  }
+  const delBtn = e.target.closest('button[data-mcp-del]');
+  if (delBtn) {
+    const id = delBtn.dataset.mcpDel;
+    runAction(() => api(`/api/mcp-servers?server_id=${encodeURIComponent(id)}`, 'DELETE'), `已移除控制台覆盖 ${id}`);
+  }
+});
+
+$('createScheduleBtn').onclick = () => runAction(async () => {
+  const group = $('groupOpenid').value.trim();
+  await api('/api/schedules', 'POST', {
+    due_at: $('due').value,
+    time_zone: $('zone').value,
+    source_event_id: $('sourceEvent').value,
+    work_item_id: $('workItem').value,
+    resume_prompt: $('resumePrompt').value,
+    destination: group ? { channel: 'qq', group_openid: group } : {},
+  });
+  $('resumePrompt').value = '';
+}, '定时任务已创建');
+
+$('scheduleTable').addEventListener('click', e => {
+  const retryBtn = e.target.closest('button[data-sched-retry]');
+  if (retryBtn) return runAction(() => api('/api/schedules/retry', 'POST', { schedule_id: retryBtn.dataset.schedRetry }), '已重新调度任务');
+  const cancelBtn = e.target.closest('button[data-sched-cancel]');
+  if (cancelBtn) return runAction(() => api('/api/schedules?schedule_id=' + encodeURIComponent(cancelBtn.dataset.schedCancel), 'DELETE'), '定时任务已取消');
+});
+
+$('dssuperagentWebEnabled').onchange = () => saveToggle('/api/settings/dssuperagent-web-search', $('dssuperagentWebEnabled'), 'DSSuperAgent 联网检索开关已更新');
+$('dshWebEnabled').onchange = () => saveToggle('/api/settings/dsh-web-search', $('dshWebEnabled'), 'DSH 沙箱联网检索开关已更新');
+$('downwardCompatEnabled').onchange = () => saveToggle('/api/settings/downward-compat', $('downwardCompatEnabled'), '全局向下兼容策略已更新');
+$('saveBotBehaviorBtn').onclick = () => runAction(() => api('/api/settings/bot-behavior', 'PUT', {
+  ambient_listen_enabled: $('ambientListenEnabled').checked,
+  ambient_cooldown_seconds: Number($('ambientCooldownSeconds').value || 300),
+  bot_aliases: $('botAliasesInput').value,
+}), '群聊感知与触发设置已保存');
+
+$('saveRetentionBtn').onclick = () => runAction(() => api('/api/settings/file-retention', 'PUT', {
+  retention_days: Number($('retentionDaysInput').value || 15),
+}), '工作区文件留存周期已保存');
+
+async function pruneWorkspaceFilesNow() {
+  const res = await api('/api/workspace-files/prune', 'POST', {});
+  showToast(`清理完成：检查 ${res.checked_workspaces || 0} 个工作区，删除 ${res.deleted_files || 0} 个过期文件（释放 ${fmtBytes(res.freed_bytes || 0)}）`, 'ok');
+  await refresh();
+}
+$('pruneFilesBtn').onclick = () => runAction(pruneWorkspaceFilesNow);
+$('pruneFilesTableBtn').onclick = () => runAction(pruneWorkspaceFilesNow);
+
+$('workspaceFilesTable').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-dl-ws]');
+  if (!btn) return;
+  downloadWorkspaceFile(btn.dataset.dlWs, btn.dataset.dlPath, btn.dataset.dlName);
+});
+
+function renderWorkspaceFiles(files, retentionDays) {
+  $('wsRetentionLabel').textContent = String(retentionDays || 15);
+  if (!files.length) {
+    $('workspaceFilesTable').innerHTML = '<p class="muted">当前各会话工作区暂无留存文件。</p>';
+    return;
+  }
+  const catLabel = {
+    inputs: '输入原件',
+    outputs: '交付产出',
+    artifacts: '步骤报告',
+    legacy_out: '历史临时',
+  };
+  $('workspaceFilesTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>文件名与路径</th><th>分类</th><th>Workspace / 层级</th><th>大小</th><th>更新时间 / 剩余留存</th><th></th></tr></thead><tbody>${files.map(f => `
+    <tr>
+      <td><strong>${esc(f.filename)}</strong><br><small><code>${esc(f.relative_path)}</code></small></td>
+      <td>${chip(f.category === 'outputs' ? 'done' : f.category === 'inputs' ? 'l2' : '', catLabel[f.category] || f.category)}</td>
+      <td><code>${esc(f.workspace_id)}</code><br><small>${esc(f.tier || '-')}</small></td>
+      <td>${esc(fmtBytes(f.size_bytes))}</td>
+      <td><small>${esc(fmtTime(f.modified_at))}</small><br><small class="muted">剩余 ${esc(String(f.remaining_days))} 天</small></td>
+      <td><button class="sm" data-dl-ws="${esc(f.workspace_id)}" data-dl-path="${esc(f.relative_path)}" data-dl-name="${esc(f.filename)}">下载</button></td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+async function downloadWorkspaceFile(wsId, relPath, filename) {
+  try {
+    const q = new URLSearchParams({ workspace_id: wsId, path: relPath });
+    const resp = await fetch('/api/workspace-files/download?' + q, {
+      headers: { Authorization: 'Bearer ' + apiToken() },
+    });
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      throw new Error(errData.error || ('HTTP ' + resp.status));
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename || 'download';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    showToast('下载失败：' + err.message, 'err');
+  }
+}
+
+$('gapStatusFilters').addEventListener('click', e => {
+  const b = e.target.closest('button[data-gap-status]');
+  if (!b) return;
+  $('gapStatusFilters').querySelectorAll('button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  state.gapStatusFilter = b.dataset.gapStatus;
+  renderCapabilityGaps();
+});
+
+$('gapTable').addEventListener('click', e => {
+  const jump = e.target.closest('button[data-jump-tab]');
+  if (jump) return switchTab(jump.dataset.jumpTab);
+  const act = e.target.closest('button[data-gap-action]');
+  if (!act) return;
+  const note = act.dataset.gapAction === 'resolved'
+    ? (prompt('可选填写补齐说明（例如：已添加 calc_margin.py 脚本）：', '') ?? '')
+    : '';
+  runAction(() => api('/api/capability-gaps', 'PUT', {
+    gap_id: act.dataset.gapId,
+    status: act.dataset.gapAction,
+    resolution_note: note,
+  }), '能力缺口状态已更新');
+});
+
+$('logExecPicker').onchange = () => {
+  const v = $('logExecPicker').value;
+  if (!v) return;
+  const idx = v.indexOf('::');
+  if (idx >= 0) loadExecutionLogs(v.slice(0, idx), v.slice(idx + 2));
+};
+$('loadExecLogsBtn').onclick = () => loadExecutionLogs();
+$('logTypeFilter').onchange = renderAuditLogs;
+$('logSearch').addEventListener('input', renderAuditLogs);
+
+document.body.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-open-log-exec]');
+  if (!btn) return;
+  closeTrace();
+  switchTab('logs');
+  loadExecutionLogs(btn.dataset.openLogWs, btn.dataset.openLogExec);
+});
+
+$('token').value = apiToken();
+if (apiToken()) refresh();
+setInterval(() => {
+  if ($('autoRefresh').checked && apiToken()) refresh();
+}, 5000);
 </script>
 </body>
 </html>

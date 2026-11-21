@@ -13,7 +13,7 @@ class Store:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._transaction_lock = threading.RLock()
-        self.connection = sqlite3.connect(path, check_same_thread=False)
+        self.connection = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=FULL")
@@ -120,8 +120,21 @@ class Store:
                 display_name TEXT NOT NULL,
                 time_zone TEXT NOT NULL,
                 status TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'customer',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_groups (
+                scope_key TEXT PRIMARY KEY,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                tier TEXT NOT NULL DEFAULT 'client_group',
+                downward_compat TEXT NOT NULL DEFAULT 'inherit',
+                notes TEXT NOT NULL DEFAULT '',
+                discovered_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(source_type, source_id)
             );
             CREATE TABLE IF NOT EXISTS identity_bindings (
                 binding_id TEXT PRIMARY KEY,
@@ -133,6 +146,26 @@ class Store:
                 created_at TEXT NOT NULL,
                 UNIQUE(provider, account_id, scope_id, external_id)
             );
+            CREATE TABLE IF NOT EXISTS identity_bind_codes (
+                code_hash TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES managed_users(user_id),
+                role_hint TEXT NOT NULL DEFAULT '',
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                used_at TEXT,
+                used_by_external_id TEXT
+            );
+            CREATE TABLE IF NOT EXISTS knowledge_shares (
+                share_id TEXT PRIMARY KEY,
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                target_scope_type TEXT NOT NULL,
+                target_scope_id TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(target_kind, target_id, target_scope_type, target_scope_id)
+            );
             CREATE INDEX IF NOT EXISTS identity_bindings_user_idx ON identity_bindings(user_id);
             CREATE TABLE IF NOT EXISTS scheduled_tasks (
                 schedule_id TEXT PRIMARY KEY,
@@ -143,6 +176,24 @@ class Store:
                 updated_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS scheduled_tasks_due_idx ON scheduled_tasks(status, due_at);
+            CREATE TABLE IF NOT EXISTS capability_gaps (
+                gap_id TEXT PRIMARY KEY,
+                event_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                group_tier TEXT NOT NULL DEFAULT 'client_group',
+                topic TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                missing_capability TEXT NOT NULL,
+                gap_kind TEXT NOT NULL DEFAULT 'other',
+                suggested_solution TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                resolution_note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS capability_gaps_status_idx ON capability_gaps(status, created_at);
             CREATE TABLE IF NOT EXISTS settings (
                 setting_key TEXT PRIMARY KEY,
                 payload TEXT NOT NULL,
@@ -192,6 +243,8 @@ class Store:
                 scope_type TEXT NOT NULL,
                 scope_id TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
+                source_type TEXT NOT NULL DEFAULT '',
+                source_id TEXT NOT NULL DEFAULT '',
                 expires_at TEXT NOT NULL,
                 call_count INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
@@ -199,6 +252,13 @@ class Store:
             CREATE INDEX IF NOT EXISTS knowledge_grants_expiry_idx ON knowledge_grants(expires_at);
             """
         )
+        user_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(managed_users)")}
+        if "role" not in user_columns:
+            self.connection.execute("ALTER TABLE managed_users ADD COLUMN role TEXT NOT NULL DEFAULT 'customer'")
+        grant_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(knowledge_grants)")}
+        for name, declaration in {"source_type": "TEXT NOT NULL DEFAULT ''", "source_id": "TEXT NOT NULL DEFAULT ''"}.items():
+            if name not in grant_columns:
+                self.connection.execute(f"ALTER TABLE knowledge_grants ADD COLUMN {name} {declaration}")
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(knowledge_documents)")}
         if "dataset_id" in columns and "backend_id" not in columns:
             self.connection.execute("ALTER TABLE knowledge_documents RENAME COLUMN dataset_id TO backend_id")
@@ -240,6 +300,14 @@ class Store:
             except Exception:
                 self.connection.rollback()
                 raise
+
+    def fetchone(self, sql: str, parameters: tuple[Any, ...] | list[Any] = ()) -> sqlite3.Row | None:
+        with self._transaction_lock:
+            return self.connection.execute(sql, parameters).fetchone()
+
+    def fetchall(self, sql: str, parameters: tuple[Any, ...] | list[Any] = ()) -> list[sqlite3.Row]:
+        with self._transaction_lock:
+            return self.connection.execute(sql, parameters).fetchall()
 
     @staticmethod
     def encode(value: dict[str, Any]) -> str:

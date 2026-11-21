@@ -10,11 +10,11 @@
 
 ```text
 workspace/
-├── work/       # 当前任务输入和临时文件
+├── work/       # 保留期内的任务输入（inputs/<execution_id>/）与产出交付物（outputs/<work_item_id>/），默认留存 15 天
 ├── tools/      # Agent 自建脚本和工具
-├── artifacts/  # 可交付成果
-├── logs/       # 执行日志
-├── state/      # 工作环境状态和依赖清单
+├── artifacts/  # 阶段与最终执行报告（默认随工作区留存 15 天）
+├── logs/       # 执行日志（保留审计）
+├── state/      # 工作环境状态和依赖清单（保留状态）
 └── cache/      # 可清理的依赖缓存
 ```
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import platform
@@ -237,10 +238,61 @@ class WorkspaceRuntime:
         return WorkspaceExecution.from_dict(value)
 
     def read_logs(self, workspace_id: str, execution_id: str) -> dict[str, str]:
-        execution = self.get_execution(workspace_id, execution_id)
+        record = self.manager.get_execution_record(workspace_id, execution_id)
+        if record.get("runtime") == "dsh":
+            return self._read_dsh_logs(workspace_id, execution_id, record)
+        execution = WorkspaceExecution.from_dict(record)
         stdout = self.manager.validate_path(workspace_id, execution.stdout_path).read_text(encoding="utf-8")
         stderr = self.manager.validate_path(workspace_id, execution.stderr_path).read_text(encoding="utf-8")
         return {"stdout": stdout, "stderr": stderr}
+
+    def _read_dsh_logs(self, workspace_id: str, execution_id: str, record: dict[str, object]) -> dict[str, str]:
+        result = record.get("result") if isinstance(record.get("result"), dict) else {}
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        raw_paths = result.get("log_paths") if isinstance(result.get("log_paths"), list) else []
+        log_paths = [str(p) for p in raw_paths if isinstance(p, str) and p.strip()] or [
+            f"logs/dsh/{execution_id}.events.jsonl"
+        ]
+        summary_lines = [
+            f"execution_id: {execution_id} | runtime: dsh | status: {record.get('status') or result.get('status') or 'unknown'}",
+        ]
+        if metadata.get("started_at") or metadata.get("finished_at"):
+            summary_lines.append(f"time: {metadata.get('started_at') or '-'} -> {metadata.get('finished_at') or '-'}")
+        if metadata.get("tools_used"):
+            summary_lines.append(f"tools_used: {', '.join(str(t) for t in metadata['tools_used'])}")
+        if result.get("artifact_paths"):
+            summary_lines.append(f"artifacts: {', '.join(str(a) for a in result['artifact_paths'])}")
+
+        trace_lines: list[str] = []
+        for rel_path in log_paths:
+            try:
+                log_file = self.manager.validate_path(workspace_id, rel_path)
+            except ValueError:
+                continue
+            if not log_file.is_file() or log_file.is_symlink():
+                continue
+            text = log_file.read_text(encoding="utf-8", errors="replace")
+            if len(text) > 150_000:
+                text = text[-150_000:]
+            for raw in text.splitlines():
+                line = raw.strip()
+                if not line:
+                    continue
+                trace_lines.append(_format_dsh_event_line(line))
+
+        output = str(result.get("output") or "").strip()
+        stdout_parts = ["\n".join(summary_lines)]
+        if trace_lines:
+            stdout_parts.append("--- DSH 执行轨迹 ---\n" + "\n".join(trace_lines))
+        if output:
+            stdout_parts.append("--- 输出摘要 ---\n" + output[:12000])
+
+        stderr_parts: list[str] = []
+        if metadata.get("error_category"):
+            stderr_parts.append(f"error_category: {metadata['error_category']}")
+        if result.get("error"):
+            stderr_parts.append(str(result["error"]))
+        return {"stdout": "\n\n".join(stdout_parts), "stderr": "\n".join(stderr_parts)}
 
     def _resolve_cwd(self, workspace_id: str, cwd: str) -> Path:
         relative = Path(cwd)
@@ -292,3 +344,36 @@ class WorkspaceRuntime:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+def _format_dsh_event_line(raw_line: str) -> str:
+    try:
+        event = json.loads(raw_line)
+    except json.JSONDecodeError:
+        return raw_line[:500]
+    if not isinstance(event, dict):
+        return raw_line[:500]
+    kind = str(event.get("type") or "event")
+    if kind == "tool_call":
+        tool = event.get("tool") or event.get("name") or "tool"
+        inp = json.dumps(event.get("input", {}), ensure_ascii=False)
+        if len(inp) > 300:
+            inp = inp[:300] + "..."
+        return f"[tool_call] {tool}: {inp}"
+    if kind == "tool_result":
+        status = event.get("status") or ""
+        res = event.get("result")
+        text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+        if len(text) > 500:
+            text = text[:500] + "..."
+        return f"[tool_result] ({status}) {text}"
+    if kind == "status":
+        parts = [f"{k}={event[k]}" for k in ("phase", "turn", "step") if k in event]
+        return f"[status] {' '.join(parts)}"
+    if kind in {"thinking", "text", "final"}:
+        body = str(event.get("text") or event.get("content") or event.get("message") or "")
+        if len(body) > 1000:
+            body = body[:1000] + "..."
+        return f"[{kind}] {body}" if body else f"[{kind}]"
+    compact = json.dumps(event, ensure_ascii=False)
+    return compact[:400] + ("..." if len(compact) > 400 else "")

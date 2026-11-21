@@ -6,7 +6,11 @@
 
 | 模块 | 责任 | 主要入口 |
 |---|---|---|
-| QQ Channel | 接收群消息、映射内部用户、读取附件并转成事件；发送仍经过发布决定和 Outbox。 | `app/qq_channel.py` |
+| 群聊感知与双模式触发设置 | `/api/settings/bot-behavior` 管理 `ambient_listen_enabled`、`ambient_cooldown_seconds`（默认 `300s`，范围 `0–3600s`）与 `bot_aliases`（仅作 DSS 语义分流别名提示，非硬性关键词拦截）；`/api/capability-gaps` 展示 Mode 2 沉淀的能力缺口提升列表。 | `app/admin_api.py`、`web/index.html` |
+| 共享工具与组件层 | `/api/tools*` 管理 `common`（全层只读）与 `internal`（L2/L3 只读、L1 隔离）脚本及 Python `pip --target` 包，并支持预装 `openpyxl` 到 `common` 供表格解析/生成复用。 | `app/shared_tools.py`、`app/admin_api.py` |
+| 受控 MCP 工具服务 | `/api/mcp-servers` 结合 `COMPANY_AGENT_MCP_SERVERS` 管理受控 `stdio` / `streamable-http` MCP 服务（支持 `http://wsl-host:<port>/mcp` 自动解析 WSL2 到 Windows 宿主机的默认网关），按 `admin` / `internal` / `common` 权限分级挂载到 DSH 主进程，仅保存环境变量名引用，密钥留在 `runtime.env` 并由 Bubblewrap `--unsetenv` 从 `bash` 沙箱彻底擦除。 | `app/mcp_registry.py`、`app/dsh_plugins/controlled-mcp.mjs`、`app/admin_api.py`、`web/index.html` |
+| 会话文件留存与产物下载 | `/api/settings/file-retention` 管理工作区文件保留天数（默认 `15` 天 / 半个月，范围 `1–365` 天），`/api/workspace-files`、`/api/workspace-files/download` 与 `/api/workspace-files/prune` 列出、下载并按 TTL 清理超期的 `work/inputs/`、`work/outputs/`、`work/out/`、`artifacts/` 文件。 | `app/workspace_retention.py`、`app/admin_api.py`、`web/index.html` |
+| QQ Channel | 接收群消息、映射内部用户、读取附件并转成事件；外发经过发布决定和独立幂等 Outbox 队列（含文本 `msg_type=0` 及 `/files` + `msg_type=7` 群/私聊文件上传投递）。 | `app/qq_channel.py` |
 | 附件读取 | 安全下载并提取文本；二进制不落盘，提取状态和文本摘要写入附件记录。 | `app/attachments.py` |
 | 用户身份 | 管理内部用户及 QQ/其他平台外部 ID 绑定；群级绑定优先，全局 `*` 绑定作为回退。 | `app/identity.py` |
 | 定时任务 | 将用户本地时间换算为 UTC，持久化来源事件、工作项、续接提示、上下文和回复目标；重启后恢复未完成唤醒。 | `app/scheduler.py`、`app/scheduled_resume.py` |

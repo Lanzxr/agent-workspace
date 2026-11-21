@@ -224,7 +224,7 @@ class AttachmentIngestor:
 
     def pending_event_ids(self) -> list[str]:
         pending: set[str] = set()
-        for row in self.store.connection.execute("SELECT event_id,payload FROM attachments"):
+        for row in self.store.fetchall("SELECT event_id,payload FROM attachments"):
             payload = self.store.decode(row["payload"])
             if payload.get("status") in {"received", "downloading", "stored", "processing"}:
                 pending.add(row["event_id"])
@@ -252,8 +252,8 @@ class AttachmentIngestor:
                 "sensitive": detected.sensitive, "original_path": str(target), "status": "stored"}
 
     def _refresh_event(self, event: Event, on_update: Callable[[Event], None] | None) -> Event:
-        rows = self.store.connection.execute("SELECT payload FROM attachments WHERE event_id=? ORDER BY created_at",
-                                             (event.event_id,)).fetchall()
+        rows = self.store.fetchall("SELECT payload FROM attachments WHERE event_id=? ORDER BY created_at",
+                                   (event.event_id,))
         payloads = [self.store.decode(row["payload"]) for row in rows]
         payloads.sort(key=lambda value: value.get("index", 0))
         updated = replace(event, attachments=[self._public(value) for value in payloads])
@@ -261,8 +261,9 @@ class AttachmentIngestor:
             on_update(updated)
         return updated
 
-    @staticmethod
-    def _scope(event: Event) -> tuple[str, str]:
+    def _scope(self, event: Event) -> tuple[str, str]:
+        if self.knowledge_service is not None and hasattr(self.knowledge_service, "source_scope"):
+            return self.knowledge_service.source_scope(event)
         if event.source_type in {"qq.group", "qq.guild"}:
             return "group", event.source_id
         if event.source_type in {"qq.direct", "qq.private", "qq.c2c"}:
@@ -276,8 +277,8 @@ class AttachmentIngestor:
         return {key: payload[key] for key in keys if key in payload}
 
     def _load_payload(self, attachment_id: str) -> dict[str, Any]:
-        row = self.store.connection.execute("SELECT payload FROM attachments WHERE attachment_id=?",
-                                            (attachment_id,)).fetchone()
+        row = self.store.fetchone("SELECT payload FROM attachments WHERE attachment_id=?",
+                                  (attachment_id,))
         if row is None:
             raise ValueError("attachment record does not exist")
         return self.store.decode(row["payload"])

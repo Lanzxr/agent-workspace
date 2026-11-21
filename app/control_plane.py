@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -67,7 +68,7 @@ class ControlPlane:
         self.store.close()
 
     def get_setting(self, key: str, default: Any = None) -> Any:
-        row = self.store.connection.execute("SELECT payload FROM settings WHERE setting_key=?", (key,)).fetchone()
+        row = self.store.fetchone("SELECT payload FROM settings WHERE setting_key=?", (key,))
         return self.store.decode(row[0])["value"] if row else default
 
     def set_setting(self, key: str, value: Any) -> None:
@@ -633,6 +634,7 @@ class ControlPlane:
         body: str,
         idempotency_key: str,
         destination: dict[str, str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> PublicationDecision:
         if work_item_id is not None:
             self.get_work_item(work_item_id)
@@ -647,6 +649,11 @@ class ControlPlane:
                                            or not isinstance(value, str) or not value.strip()
                                            for key, value in destination.items()):
             raise ValueError("publication destination must contain non-empty string fields")
+        clean_attachments: list[dict[str, Any]] = []
+        if attachments is not None:
+            if not isinstance(attachments, list) or len(attachments) > 10 or any(not isinstance(a, dict) for a in attachments):
+                raise ValueError("publication attachments must be at most ten objects")
+            clean_attachments = [dict(a) for a in attachments]
         now = self.now()
         outbox_id = None if disposition == "suppress" else self.new_id("outbox")
         decision = PublicationDecision(
@@ -683,7 +690,8 @@ class ControlPlane:
                         and outbox_destination.get("reply_to_message_id")):
                     self._assign_qq_reply_sequence(connection, conversation_id, outbox_destination)
                 message = OutboxMessage(outbox_id, conversation_id, body, idempotency_key, "pending", now,
-                                        outbox_destination, publication_disposition=disposition)
+                                        outbox_destination, publication_disposition=disposition,
+                                        attachments=clean_attachments)
                 connection.execute(
                     "INSERT INTO outbox(outbox_id, idempotency_key, payload, status, created_at) VALUES (?, ?, ?, ?, ?)",
                     (outbox_id, idempotency_key, self.store.encode(message.to_dict()), message.status, now),
@@ -693,6 +701,7 @@ class ControlPlane:
                 "reason": reason,
                 "policy_version": policy_version,
                 "outbox_id": outbox_id,
+                **({"attachments": len(clean_attachments)} if clean_attachments else {}),
             }, now)
         return decision
 
@@ -711,6 +720,11 @@ class ControlPlane:
             (conversation_id, destination["reply_to_message_id"]),
         ).fetchone()
         sequence = int(row[0]) + 1 if row else 1
+        if sequence > 5:
+            # Exceeding QQ's 5-reply passive cap falls back cleanly to active delivery.
+            destination.pop("reply_to_message_id", None)
+            destination.pop("msg_seq", None)
+            return
         if row:
             connection.execute(
                 "UPDATE qq_reply_sequences SET last_sequence = ? WHERE conversation_id = ? AND reply_message_id = ?",
@@ -724,7 +738,8 @@ class ControlPlane:
         destination["msg_seq"] = str(sequence)
 
     def list_outbox(self) -> list[OutboxMessage]:
-        rows = self.store.connection.execute("SELECT payload FROM outbox ORDER BY rowid").fetchall()
+        with self.store._transaction_lock:
+            rows = self.store.connection.execute("SELECT payload FROM outbox ORDER BY rowid").fetchall()
         return [OutboxMessage.from_dict(self.store.decode(row[0])) for row in rows]
 
     def _transition_outbox(self, outbox_id: str, expected: set[str], status: str, action: str,
@@ -812,11 +827,124 @@ class ControlPlane:
                 self._audit(connection, "execution", request.execution_id, "recovered", {}, now)
 
     def list_audit(self, *, entity_type: str, entity_id: str) -> list[AuditEntry]:
-        rows = self.store.connection.execute(
+        rows = self.store.fetchall(
             "SELECT audit_id, entity_type, entity_id, action, payload, created_at FROM audit WHERE entity_type = ? AND entity_id = ? ORDER BY audit_id",
             (entity_type, entity_id),
-        ).fetchall()
+        )
         return [AuditEntry.from_row((row[0], row[1], row[2], row[3], self.store.decode(row[4]), row[5])) for row in rows]
+
+    def record_capability_gap(
+        self,
+        *,
+        event_id: str,
+        source_type: str,
+        source_id: str,
+        conversation_id: str,
+        group_tier: str,
+        topic: str,
+        summary: str,
+        missing_capability: str,
+        suggested_solution: str,
+        gap_kind: str = "other",
+    ) -> dict[str, Any]:
+        cleaned_topic = (topic or "").strip()[:200]
+        cleaned_summary = (summary or "").strip()[:1000]
+        cleaned_missing = (missing_capability or "").strip()[:300]
+        cleaned_solution = (suggested_solution or "").strip()[:1000]
+        if not event_id.strip() or not cleaned_topic or not cleaned_summary or not cleaned_missing or not cleaned_solution:
+            raise ValueError("capability gap event_id, topic, summary, missing_capability, and suggested_solution are required")
+        normalized_kind = gap_kind if gap_kind in {
+            "tool_script", "python_package", "knowledge_access", "external_api", "other"
+        } else "other"
+        gap_id = f"gap-{hashlib.sha256(event_id.encode('utf-8')).hexdigest()[:24]}"
+        now = self.now()
+        with self.store.transaction() as connection:
+            existing = connection.execute(
+                "SELECT gap_id,event_id,source_type,source_id,conversation_id,group_tier,topic,summary,"
+                "missing_capability,gap_kind,suggested_solution,status,resolution_note,created_at,updated_at "
+                "FROM capability_gaps WHERE gap_id = ?",
+                (gap_id,),
+            ).fetchone()
+            if existing is not None:
+                return dict(existing)
+            connection.execute(
+                "INSERT INTO capability_gaps(gap_id,event_id,source_type,source_id,conversation_id,"
+                "group_tier,topic,summary,missing_capability,gap_kind,suggested_solution,status,"
+                "resolution_note,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    gap_id, event_id.strip(), source_type.strip(), source_id.strip(), conversation_id.strip(),
+                    (group_tier or "client_group").strip()[:40], cleaned_topic, cleaned_summary,
+                    cleaned_missing, normalized_kind, cleaned_solution, "open", "", now, now,
+                ),
+            )
+            record = {
+                "gap_id": gap_id,
+                "event_id": event_id.strip(),
+                "source_type": source_type.strip(),
+                "source_id": source_id.strip(),
+                "conversation_id": conversation_id.strip(),
+                "group_tier": (group_tier or "client_group").strip()[:40],
+                "topic": cleaned_topic,
+                "summary": cleaned_summary,
+                "missing_capability": cleaned_missing,
+                "gap_kind": normalized_kind,
+                "suggested_solution": cleaned_solution,
+                "status": "open",
+                "resolution_note": "",
+                "created_at": now,
+                "updated_at": now,
+            }
+            self._audit(connection, "capability_gap", gap_id, "recorded", {
+                "topic": cleaned_topic,
+                "missing_capability": cleaned_missing,
+                "gap_kind": normalized_kind,
+                "source_id": source_id.strip(),
+            }, now)
+            return record
+
+    def list_capability_gaps(self, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        bounded = max(1, min(limit, 300))
+        if status and status != "all":
+            if status not in {"open", "resolved", "dismissed"}:
+                raise ValueError("capability gap status must be open, resolved, or dismissed")
+            rows = self.store.fetchall(
+                "SELECT gap_id,event_id,source_type,source_id,conversation_id,group_tier,topic,summary,"
+                "missing_capability,gap_kind,suggested_solution,status,resolution_note,created_at,updated_at "
+                "FROM capability_gaps WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                (status, bounded),
+            )
+        else:
+            rows = self.store.fetchall(
+                "SELECT gap_id,event_id,source_type,source_id,conversation_id,group_tier,topic,summary,"
+                "missing_capability,gap_kind,suggested_solution,status,resolution_note,created_at,updated_at "
+                "FROM capability_gaps ORDER BY created_at DESC LIMIT ?",
+                (bounded,),
+            )
+        return [dict(row) for row in rows]
+
+    def update_capability_gap_status(self, gap_id: str, *, status: str, resolution_note: str = "") -> dict[str, Any]:
+        if status not in {"open", "resolved", "dismissed"}:
+            raise ValueError("capability gap status must be open, resolved, or dismissed")
+        now = self.now()
+        cleaned_note = (resolution_note or "").strip()[:400]
+        with self.store.transaction() as connection:
+            existing = connection.execute(
+                "SELECT gap_id FROM capability_gaps WHERE gap_id = ?", (gap_id,)
+            ).fetchone()
+            if existing is None:
+                raise NotFound(f"capability gap not found: {gap_id}")
+            connection.execute(
+                "UPDATE capability_gaps SET status = ?, resolution_note = ?, updated_at = ? WHERE gap_id = ?",
+                (status, cleaned_note, now, gap_id),
+            )
+            row = connection.execute(
+                "SELECT gap_id,event_id,source_type,source_id,conversation_id,group_tier,topic,summary,"
+                "missing_capability,gap_kind,suggested_solution,status,resolution_note,created_at,updated_at "
+                "FROM capability_gaps WHERE gap_id = ?",
+                (gap_id,),
+            ).fetchone()
+            self._audit(connection, "capability_gap", gap_id, status, {"resolution_note": cleaned_note}, now)
+            return dict(row)
 
     def _find_plan_for_work_item(self, work_item_id: str) -> WorkPlan:
         row = self.store.connection.execute(

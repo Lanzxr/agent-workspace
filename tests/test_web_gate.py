@@ -119,3 +119,44 @@ class WebGateTests(unittest.TestCase):
             settings = WebGateSettings.load(path)
             self.assertEqual(settings.port, 8768)
             self.assertEqual(settings.api_key, "k" * 40)
+
+    def test_dsh_search_endpoint_tracks_dsh_enabled_and_bearer_auth(self) -> None:
+        dss_enabled = [False]
+        dsh_enabled = [True]
+        calls = []
+
+        def search(query: str, max_results: int) -> dict:
+            calls.append((query, max_results))
+            return {"query": query, "sources": [{"url": "https://example.org", "title": "Ex"}], "truncated": False}
+
+        server = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            make_handler(
+                enabled=lambda: dss_enabled[0],
+                dsh_enabled=lambda: dsh_enabled[0],
+                api_key="gate-key",
+                search=search,
+            ),
+        )
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        endpoint = f"http://127.0.0.1:{server.server_port}/internal/web/dsh-search"
+        try:
+            req = Request(
+                endpoint,
+                method="POST",
+                data=json.dumps({"query": "searxng live check", "max_results": 5}).encode(),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer gate-key"},
+            )
+            with urlopen(req, timeout=2) as response:
+                data = json.loads(response.read())
+            self.assertEqual(data["sources"][0]["url"], "https://example.org")
+            self.assertEqual(calls, [("searxng live check", 5)])
+            dsh_enabled[0] = False
+            with self.assertRaises(HTTPError) as err:
+                urlopen(req, timeout=2)
+            self.assertEqual(err.exception.code, 403)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)

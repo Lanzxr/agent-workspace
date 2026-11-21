@@ -65,7 +65,8 @@ class WebGateSettings:
 
 def make_handler(*, enabled: Callable[[], bool], api_key: str = "",
                  audit: Callable[[str, dict[str, Any]], None] | None = None,
-                 search: Callable[[str, int], dict[str, Any]] | None = None):
+                 search: Callable[[str, int], dict[str, Any]] | None = None,
+                 dsh_enabled: Callable[[], bool] | None = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "CompanyAgentWebGate/1.0"
 
@@ -82,13 +83,19 @@ def make_handler(*, enabled: Callable[[], bool], api_key: str = "",
             self.wfile.write(body)
 
         def _authorized(self) -> bool:
-            return not api_key or hmac.compare_digest(
-                self.headers.get("X-Company-Agent-Bridge-Key", ""), api_key
-            )
+            if not api_key:
+                return True
+            header_key = self.headers.get("X-Company-Agent-Bridge-Key", "")
+            if header_key and hmac.compare_digest(header_key, api_key):
+                return True
+            auth_header = self.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                return hmac.compare_digest(auth_header[7:].strip(), api_key)
+            return False
 
         def do_POST(self) -> None:
             route = urlsplit(self.path).path
-            if route not in {"/internal/web/authorize", "/internal/web/search"}:
+            if route not in {"/internal/web/authorize", "/internal/web/search", "/internal/web/dsh-search"}:
                 self._send(404, {"error": "not found"})
                 return
             if not self._authorized():
@@ -101,7 +108,8 @@ def make_handler(*, enabled: Callable[[], bool], api_key: str = "",
                 value = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(value, dict):
                     raise ValueError("request body must be an object")
-                is_search = route == "/internal/web/search"
+                is_search = route in {"/internal/web/search", "/internal/web/dsh-search"}
+                gate_enabled = dsh_enabled if (route == "/internal/web/dsh-search" and dsh_enabled is not None) else enabled
                 operation = "search" if is_search else value.get("operation")
                 if operation not in {"search", "fetch"}:
                     raise ValueError("operation must be search or fetch")
@@ -114,14 +122,14 @@ def make_handler(*, enabled: Callable[[], bool], api_key: str = "",
                     raise ValueError("request_id must be at most 200 characters")
                 if operation == "search":
                     record = {"operation": operation, "query_sha256": hashlib.sha256(target.strip().encode("utf-8")).hexdigest(),
-                              "request_id": request_id or ""}
+                              "request_id": request_id or "", "route": route}
                 else:
                     parsed_target = urlsplit(target)
                     record = {"operation": operation, "host": (parsed_target.hostname or "")[:255],
                               "request_id": request_id or ""}
                 if audit:
                     audit("web_authorize", record)
-                if not enabled():
+                if not gate_enabled():
                     self._send(403, {"error": "web search is disabled"})
                     return
                 if is_search:
@@ -160,7 +168,8 @@ class WebGateServer:
     """Small authenticated server that re-checks the Company Agent web switch per call."""
 
     def __init__(self, settings: WebGateSettings, *, enabled: Callable[[], bool],
-                 audit: Callable[[str, dict[str, Any]], None] | None = None) -> None:
+                 audit: Callable[[str, dict[str, Any]], None] | None = None,
+                 dsh_enabled: Callable[[], bool] | None = None) -> None:
         self.server = ThreadingHTTPServer(
             (settings.host, settings.port),
             make_handler(
@@ -168,6 +177,7 @@ class WebGateServer:
                 api_key=settings.api_key,
                 audit=audit,
                 search=SearxngSearch(settings.search_url, settings.search_timeout_seconds),
+                dsh_enabled=dsh_enabled,
             ),
         )
         self.server.daemon_threads = True
