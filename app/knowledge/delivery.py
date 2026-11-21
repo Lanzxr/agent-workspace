@@ -33,15 +33,24 @@ class KnowledgeDelivery:
         attachments = self.service.authorize_attachments(event, attachment_ids or [], require_original=True)
         if not documents and not attachments:
             return []
-        relative_root = Path("inputs") / execution_id
+        relative_root = Path("work") / "inputs" / execution_id
         inputs_root = workspace.directory("work") / "inputs"
         if inputs_root.is_symlink():
             raise ValueError("knowledge inputs directory cannot be a symbolic link")
         inputs_root.mkdir(exist_ok=True)
-        root = self.workspaces.validate_path(workspace.workspace_id, inputs_root / execution_id)
-        if root.exists() or root.is_symlink():
-            raise ValueError("reserved knowledge input directory already exists")
-        root.mkdir(parents=True, mode=0o700)
+        lexical_root = inputs_root / execution_id
+        if lexical_root.is_symlink():
+            raise ValueError("reserved knowledge input directory cannot be a symbolic link")
+        root = self.workspaces.validate_path(workspace.workspace_id, lexical_root)
+        if root.exists():
+            if not root.is_dir():
+                raise ValueError("reserved knowledge input path is not a directory")
+            # Remove abandoned partial staging artifacts before validating or refreshing inputs.
+            for partial in root.glob("*.partial"):
+                if not partial.is_symlink() and partial.is_file():
+                    partial.unlink(missing_ok=True)
+        else:
+            root.mkdir(parents=True, mode=0o700)
         staged: list[StagedKnowledgeFile] = []
         try:
             sources = [("document", item) for item in documents] + [("attachment", item) for item in attachments]
@@ -54,6 +63,14 @@ class KnowledgeDelivery:
                 filename = _safe_filename(document["filename"])
                 target_name = f"{index:02d}-{filename}"
                 target = self.workspaces.validate_path(workspace.workspace_id, root / target_name)
+                if target.is_symlink():
+                    raise ValueError("staged knowledge file cannot be a symbolic link")
+                if target.is_file() and _sha256(target) == digest_value:
+                    os.utime(target, None)
+                    reference_id = document.get("document_id") if source_type == "document" else document["attachment_id"]
+                    staged.append(StagedKnowledgeFile(reference_id, filename,
+                                                      (relative_root / target_name).as_posix(), digest_value))
+                    continue
                 partial = target.with_name(target.name + ".partial")
                 source_value = document.get("original_path")
                 if not isinstance(source_value, str) or not source_value:

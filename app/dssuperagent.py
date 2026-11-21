@@ -62,6 +62,13 @@ class DssuperAgentDecision:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class DssuperAgentClassifyResult:
+    classification: str
+    reason: str
+    model: str = ""
+
+
 class DssuperAgentAdapter:
     """Loopback adapter for the pinned DSSuperAgent Company Agent bridge."""
 
@@ -77,12 +84,18 @@ class DssuperAgentAdapter:
         self.poll_interval = poll_interval
         self._opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
 
-    def submit_event(self, event: Event, *, context: list[dict[str, Any]] | None = None) -> DssuperAgentReceipt:
-        self._validate_event(event, context or [])
+    def submit_event(self, event: Event, *, context: list[dict[str, Any]] | None = None,
+                     interaction_mode: str | None = None,
+                     available_capabilities: dict[str, Any] | None = None) -> DssuperAgentReceipt:
+        self._validate_event(event, context or [], interaction_mode=interaction_mode)
         value = event.to_dict()
         value.pop("external_actor_id", None)
         if event.knowledge_grant:
             value["knowledge_grant"] = event.knowledge_grant
+        if interaction_mode is not None:
+            value["interaction_mode"] = interaction_mode
+        if available_capabilities is not None:
+            value["available_capabilities"] = available_capabilities
         value["context"] = context or []
         body = self._request("POST", "/orchestrator/api/company-agent/events", value)
         status = body.get("status")
@@ -117,6 +130,72 @@ class DssuperAgentAdapter:
 
     def submit_execution_result(self, event: Event, *, context: list[dict[str, Any]] | None = None) -> DssuperAgentReceipt:
         return self.submit_event(event, context=context)
+
+    def classify_message(
+        self,
+        *,
+        source_type: str,
+        conversation_id: str,
+        actor_id: str,
+        content: str,
+        actor_label: str = "",
+        has_attachments: bool = False,
+        attachments: list[dict[str, Any]] | None = None,
+        bot_aliases: list[str] | tuple[str, ...] | None = None,
+        recent_messages: list[dict[str, Any]] | None = None,
+    ) -> DssuperAgentClassifyResult:
+        if source_type not in {"qq.group", "qq.guild"}:
+            raise ValueError("classify_message is only used for group/guild conversations")
+        clean_attachments = [
+            {
+                **({"filename": str(item["filename"])[:255]} if item.get("filename") else {}),
+                **({"content_type": str(item["content_type"])[:120]} if item.get("content_type") else {}),
+            }
+            for item in (attachments or [])[:10]
+            if isinstance(item, dict)
+        ]
+        clean_recent: list[dict[str, Any]] = []
+        for item in (recent_messages or [])[:20]:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            entry: dict[str, Any] = {
+                "role": role,
+                "text": str(item.get("text") or "")[:4000],
+            }
+            if item.get("actor"):
+                entry["actor"] = str(item["actor"])[:120]
+            if item.get("at"):
+                entry["at"] = str(item["at"])[:80]
+            if isinstance(item.get("attachments"), list) and item["attachments"]:
+                entry["attachments"] = [str(name)[:255] for name in item["attachments"][:10]]
+            clean_recent.append(entry)
+
+        payload: dict[str, Any] = {
+            "source_type": source_type,
+            "conversation_id": conversation_id,
+            "actor_id": actor_id,
+            "content": str(content)[:12_000],
+            "has_attachments": bool(has_attachments or clean_attachments),
+            "attachments": clean_attachments,
+            "bot_aliases": [str(alias).strip()[:40] for alias in (bot_aliases or [])[:30] if str(alias).strip()],
+            "recent_messages": clean_recent,
+        }
+        if actor_label.strip():
+            payload["actor_label"] = actor_label.strip()[:120]
+        body = self._request("POST", "/orchestrator/api/company-agent/classify", payload)
+        classification = body.get("classification")
+        if classification not in {"direct", "ongoing_discussion", "chatter"}:
+            raise DssuperAgentProtocolError("DSSuperAgent returned an invalid message classification")
+        reason = body.get("reason")
+        model = body.get("model")
+        return DssuperAgentClassifyResult(
+            classification=classification,
+            reason=reason.strip() if isinstance(reason, str) and reason.strip() else classification,
+            model=model.strip() if isinstance(model, str) else "",
+        )
 
     def _request(self, method: str, path: str, value: dict[str, Any] | None = None) -> dict[str, Any]:
         data = None if value is None else json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -202,8 +281,28 @@ class DssuperAgentAdapter:
 
     @staticmethod
     def _validate_intent(intent: dict[str, Any]) -> None:
-        if set(intent) - {"action", "rationale", "title", "objective", "completion_conditions", "plan_steps", "publication"}:
+        if set(intent) - {
+            "action", "rationale", "title", "objective", "completion_conditions",
+            "plan_steps", "publication", "silent_ack", "capability_gap",
+        }:
             raise DssuperAgentProtocolError("assistant intent contains unsupported fields")
+        if "silent_ack" in intent and not isinstance(intent["silent_ack"], bool):
+            raise DssuperAgentProtocolError("assistant intent silent_ack must be a boolean")
+        if "capability_gap" in intent:
+            gap = intent["capability_gap"]
+            if (not isinstance(gap, dict)
+                    or set(gap) - {"topic", "summary", "missing_capability", "gap_kind", "suggested_solution"}
+                    or not isinstance(gap.get("topic"), str) or not gap["topic"].strip() or len(gap["topic"]) > 200
+                    or not isinstance(gap.get("summary"), str) or not gap["summary"].strip() or len(gap["summary"]) > 1000
+                    or not isinstance(gap.get("missing_capability"), str) or not gap["missing_capability"].strip()
+                    or len(gap["missing_capability"]) > 300
+                    or not isinstance(gap.get("suggested_solution"), str) or not gap["suggested_solution"].strip()
+                    or len(gap["suggested_solution"]) > 1000):
+                raise DssuperAgentProtocolError("assistant intent capability_gap is invalid")
+            if "gap_kind" in gap and gap["gap_kind"] not in {
+                "tool_script", "python_package", "knowledge_access", "external_api", "other"
+            }:
+                raise DssuperAgentProtocolError("assistant intent capability_gap gap_kind is invalid")
         if intent.get("action") not in {"observe", "propose_work"}:
             raise DssuperAgentProtocolError("assistant intent action must be observe or propose_work")
         if (not isinstance(intent.get("rationale"), str) or not intent["rationale"].strip()
@@ -258,7 +357,9 @@ class DssuperAgentAdapter:
                     raise DssuperAgentProtocolError("plan step attachment IDs are invalid")
 
     @staticmethod
-    def _validate_event(event: Event, context: list[dict[str, Any]]) -> None:
+    def _validate_event(event: Event, context: list[dict[str, Any]], *, interaction_mode: str | None = None) -> None:
+        if interaction_mode is not None and interaction_mode not in {"direct", "ambient_cooldown"}:
+            raise DssuperAgentProtocolError("interaction_mode must be direct or ambient_cooldown")
         limits = {
             "event_id": (event.event_id, 200),
             "source_type": (event.source_type, 80),
@@ -279,11 +380,12 @@ class DssuperAgentAdapter:
             raise DssuperAgentProtocolError("event capability exceeds the DSSuperAgent bridge field limit")
         if len(context) > 10:
             raise DssuperAgentProtocolError("event context cannot contain more than ten prior messages")
-        allowed_context_fields = {"event_id", "actor_id", "occurred_at", "content"}
+        allowed_context_fields = {"event_id", "role", "actor_id", "occurred_at", "content"}
         for item in context:
             if (not isinstance(item, dict) or set(item) - allowed_context_fields
                     or not isinstance(item.get("actor_id"), str) or len(item["actor_id"]) > 200
                     or not isinstance(item.get("content"), str) or len(item["content"]) > 12000
+                    or "role" in item and item["role"] not in {"user", "assistant"}
                     or "event_id" in item and (not isinstance(item["event_id"], str) or len(item["event_id"]) > 200)
                     or "occurred_at" in item and (not isinstance(item["occurred_at"], str) or len(item["occurred_at"]) > 80)):
                 raise DssuperAgentProtocolError("event context does not match the DSSuperAgent bridge schema")

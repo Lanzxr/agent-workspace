@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from .mcp_registry import McpServerSpec, load_mcp_secrets, parse_mcp_servers_json
 
 DSH_VERSION = "0.2.2-rc.1"
 POLICY_VERSION = "workspace-dev-v1"
@@ -20,6 +23,7 @@ class QQBotSettings:
     api_base_url: str = "https://api.bot.qq.com"
     auto_execute_capabilities: frozenset[str] = frozenset()
     workspace_id: str | None = None
+    isolate_workspaces: bool = True
 
     @classmethod
     def load(cls, path: Path) -> "QQBotSettings":
@@ -50,7 +54,11 @@ class QQBotSettings:
             raise ValueError("COMPANY_AGENT_QQ_WORKSPACE is required when QQ task execution is enabled")
         if workspace_id and (len(workspace_id) > 64 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", workspace_id)):
             raise ValueError("COMPANY_AGENT_QQ_WORKSPACE must be a 1-64 character workspace ID")
-        return cls(app_id, client_secret, allowed, api_base_url, auto_execute, workspace_id)
+        isolate_workspaces = values.get("COMPANY_AGENT_QQ_ISOLATE_WORKSPACES", "true").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        return cls(app_id, client_secret, allowed, api_base_url, auto_execute, workspace_id,
+                   isolate_workspaces=isolate_workspaces)
 
 
 @dataclass(frozen=True)
@@ -61,6 +69,29 @@ class RuntimeConfig:
     dsh_command: tuple[str, ...] = ()
     source_path: Path | None = None
     web_search_enabled: bool = False
+    dsh_default_timeout_seconds: float = 3600.0
+    dsh_max_timeout_seconds: float = 7200.0
+    dsh_idle_timeout_seconds: float = 600.0
+    dsh_compaction_timeout_seconds: float = 600.0
+    dsh_soft_wrapup_seconds: float = 300.0
+    web_gate_search_url: str | None = None
+    web_gate_api_key: str = field(default="", repr=False)
+    mcp_servers: tuple[McpServerSpec, ...] = ()
+    mcp_secrets: dict[str, str] = field(default_factory=dict, repr=False)
+
+    @staticmethod
+    def _parse_web_gate_search_url(values: dict[str, str]) -> str | None:
+        raw_url = (values.get("COMPANY_AGENT_WEB_GATE_URL") or "").strip()
+        if raw_url:
+            parsed = urlsplit(raw_url)
+            if parsed.scheme in {"http", "https"} and parsed.netloc and not parsed.username and not parsed.password:
+                return f"{parsed.scheme}://{parsed.netloc}/internal/web/dsh-search"
+        raw_port = (values.get("COMPANY_AGENT_WEB_GATE_PORT") or "").strip()
+        if raw_port.isdigit() and 1 <= int(raw_port) <= 65535:
+            host = (values.get("COMPANY_AGENT_WEB_GATE_HOST") or "127.0.0.1").strip()
+            connect_host = "127.0.0.1" if host in {"", "0.0.0.0", "::"} else host
+            return f"http://{connect_host}:{raw_port}/internal/web/dsh-search"
+        return None
 
     @classmethod
     def load(cls, path: Path) -> "RuntimeConfig":
@@ -91,7 +122,55 @@ class RuntimeConfig:
                 raise ValueError("AGENT_DSH_COMMAND must be a non-empty JSON string array")
             command = tuple(decoded)
         web_enabled = values.get("AGENT_WEB_SEARCH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
-        return cls(url, model, key, command, path.expanduser().resolve(), web_enabled)
+        max_timeout = cls._parse_timeout(values, "AGENT_DSH_MAX_TIMEOUT_SECONDS", 7200.0, minimum=1.0, maximum=86400.0)
+        default_timeout = cls._parse_timeout(values, "AGENT_DSH_TIMEOUT_SECONDS", min(3600.0, max_timeout),
+                                             minimum=1.0, maximum=max_timeout)
+        idle_timeout = cls._parse_timeout(values, "AGENT_DSH_IDLE_TIMEOUT_SECONDS", min(600.0, max_timeout),
+                                          minimum=1.0, maximum=max_timeout)
+        compaction_timeout = cls._parse_timeout(values, "AGENT_DSH_COMPACTION_TIMEOUT_SECONDS", min(600.0, max_timeout),
+                                                minimum=1.0, maximum=max_timeout)
+        soft_wrapup = cls._parse_timeout(values, "AGENT_DSH_SOFT_WRAPUP_SECONDS", min(300.0, max_timeout),
+                                         minimum=0.0, maximum=min(600.0, max_timeout), allow_zero=True)
+        web_gate_search_url = cls._parse_web_gate_search_url(values)
+        web_gate_api_key = (values.get("COMPANY_AGENT_WEB_GATE_API_KEY") or "").strip()
+        if any(character in web_gate_api_key for character in "\r\n\x00"):
+            raise ValueError("web gate API key must be a single-line value")
+        mcp_servers = parse_mcp_servers_json(values.get("COMPANY_AGENT_MCP_SERVERS", ""))
+        mcp_secrets = load_mcp_secrets(values, mcp_servers)
+        return cls(
+            url, model, key, command, path.expanduser().resolve(), web_enabled,
+            dsh_default_timeout_seconds=default_timeout,
+            dsh_max_timeout_seconds=max_timeout,
+            dsh_idle_timeout_seconds=idle_timeout,
+            dsh_compaction_timeout_seconds=compaction_timeout,
+            dsh_soft_wrapup_seconds=soft_wrapup,
+            web_gate_search_url=web_gate_search_url,
+            web_gate_api_key=web_gate_api_key,
+            mcp_servers=mcp_servers,
+            mcp_secrets=mcp_secrets,
+        )
+
+    @staticmethod
+    def _parse_timeout(
+        values: dict[str, str],
+        key: str,
+        default: float,
+        *,
+        minimum: float,
+        maximum: float,
+        allow_zero: bool = False,
+    ) -> float:
+        raw = values.get(key, "").strip()
+        if not raw:
+            return float(default)
+        try:
+            parsed = float(raw)
+        except ValueError as error:
+            raise ValueError(f"{key} must be a valid number") from error
+        lower_ok = parsed >= minimum if allow_zero else parsed > 0 and parsed >= minimum
+        if not math.isfinite(parsed) or not lower_ok or parsed > maximum:
+            raise ValueError(f"{key} must be between {minimum:g} and {maximum:g}")
+        return parsed
 
     @staticmethod
     def _parse_env(path: Path) -> dict[str, str]:
@@ -178,6 +257,12 @@ class RuntimeConfig:
         return environment
 
     def redact(self, text: str) -> str:
-        for value in (self.api_key, json.dumps(self.api_key)[1:-1]):
-            text = text.replace(value, "[REDACTED]")
+        secrets = sorted(
+            {s for s in (self.api_key, self.web_gate_api_key, *self.mcp_secrets.values()) if s},
+            key=len,
+            reverse=True,
+        )
+        for secret in secrets:
+            for value in (secret, json.dumps(secret)[1:-1]):
+                text = text.replace(value, "[REDACTED]")
         return text

@@ -16,6 +16,7 @@ WORKSPACE_MANIFEST = "workspace.json"
 WORKSPACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 EXECUTION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 WORKSPACE_STATUSES = {"provisioned", "ready", "running", "suspended", "recovering", "failed", "deleted"}
+WORKSPACE_TIERS = {"admin", "internal", "client_group", "direct"}
 
 
 def validate_execution_id(execution_id: str) -> None:
@@ -46,6 +47,7 @@ class Workspace:
     status: str
     created_at: str
     updated_at: str
+    tier: str = "client_group"
 
     def directory(self, name: str) -> Path:
         if name not in WORKSPACE_DIRECTORIES:
@@ -61,7 +63,9 @@ class WorkspaceManager:
         self.base_directory.mkdir(parents=True, exist_ok=True)
         self._secure_directory(self.base_directory)
 
-    def provision(self, workspace_id: str) -> Workspace:
+    def provision(self, workspace_id: str, *, tier: str | None = None) -> Workspace:
+        if tier is not None and tier not in WORKSPACE_TIERS:
+            raise ValueError(f"unsupported workspace tier: {tier}")
         self._validate_workspace_id(workspace_id)
         root = self._workspace_root(workspace_id)
         manifest_path = root / "state" / WORKSPACE_MANIFEST
@@ -72,6 +76,12 @@ class WorkspaceManager:
             if workspace.status == "deleted":
                 raise WorkspaceStateError(f"workspace is deleted: {workspace_id}")
             self._ensure_layout(root)
+            if tier is not None and workspace.tier != tier:
+                workspace = Workspace(
+                    workspace.workspace_id, workspace.root, workspace.status,
+                    workspace.created_at, self._timestamp(), tier=tier,
+                )
+                self._write_manifest(workspace)
             return workspace
 
         if root.exists() and not root.is_dir():
@@ -79,7 +89,7 @@ class WorkspaceManager:
 
         self._ensure_layout(root)
         timestamp = self._timestamp()
-        workspace = Workspace(workspace_id, root, "ready", timestamp, timestamp)
+        workspace = Workspace(workspace_id, root, "ready", timestamp, timestamp, tier=tier or "client_group")
         self._write_manifest(workspace)
         return workspace
 
@@ -184,6 +194,7 @@ class WorkspaceManager:
             "workspace_id": workspace.workspace_id,
             "root": str(workspace.root),
             "status": workspace.status,
+            "tier": workspace.tier,
             "created_at": workspace.created_at,
             "updated_at": workspace.updated_at,
             "directories": {name: str(workspace.directory(name)) for name in WORKSPACE_DIRECTORIES},
@@ -336,9 +347,12 @@ class WorkspaceManager:
                 raise WorkspaceError(f"unsupported workspace status: {status}")
             created_at = data["created_at"]
             updated_at = data["updated_at"]
+            tier = data.get("tier") or "client_group"
+            if tier not in WORKSPACE_TIERS:
+                raise WorkspaceError(f"unsupported workspace tier: {tier}")
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
             raise WorkspaceError(f"invalid workspace manifest: {path}") from error
-        return Workspace(workspace_id, root, status, created_at, updated_at)
+        return Workspace(workspace_id, root, status, created_at, updated_at, tier=tier)
 
     def _write_manifest(self, workspace: Workspace) -> None:
         state_directory = workspace.directory("state")
@@ -350,6 +364,7 @@ class WorkspaceManager:
             "version": 1,
             "workspace_id": workspace.workspace_id,
             "status": workspace.status,
+            "tier": workspace.tier,
             "created_at": workspace.created_at,
             "updated_at": workspace.updated_at,
             "directories": list(WORKSPACE_DIRECTORIES),
@@ -411,7 +426,10 @@ class WorkspaceManager:
         return workspace
 
     def _replace_status(self, workspace: Workspace, status: str) -> Workspace:
-        return Workspace(workspace.workspace_id, workspace.root, status, workspace.created_at, self._timestamp())
+        return Workspace(
+            workspace.workspace_id, workspace.root, status,
+            workspace.created_at, self._timestamp(), tier=workspace.tier,
+        )
 
     def _safe_child(self, workspace_id: str, directory: str, relative_path: str) -> Path:
         relative = Path(relative_path)

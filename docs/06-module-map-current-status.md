@@ -60,18 +60,18 @@ Company Agent 项目
 
 | 项目模块 | 状态 | 代码/证据 |
 |---|---|---|
-| QQ Channel Adapter | 已接入正式事件链路；先保存附件占位和原件，再后台 OCR/AnythingLLM 入库；Agent 明确选件后由 Company Agent 复核并交付 DSH。真实 QQ 群消息和 CDN 下载仍需部署验收。 | `app/qq_channel.py`、`app/attachments.py`、`docs/07-step5-qq.md` |
-| Knowledge Base | AnythingLLM 适配、内容哈希去重、群/私聊/管理员权限、DSSuperAgent 短期检索授权、DSH 原件交付已实现；真实 AnythingLLM 服务验收仍需部署执行。 | `app/knowledge/`、`docs/09-knowledge-base.md` |
+| QQ Channel Adapter | 已接入双模式语义分流、群聊文件交付与正式事件链路：私聊与 `@机器人` 直接执行；未 `@` 群消息经 DSS `/orchestrator/api/company-agent/classify` 判别为 `direct` / `ongoing_discussion`（默认 300s 冷却防抖）/ `chatter`（纯闲聊略过）；支持文本说明及 `file_type: 4` + `msg_type: 7` 直传群/私聊 `.xlsx`/文档文件（≤5MB 直传、>5MB 分片上传），实际权限放行视 Bot 主体联调验证。 | `app/qq_channel.py`、`app/dssuperagent.py`、`docs/07-step5-qq.md` |
+| Knowledge Base | AnythingLLM 适配、内容哈希去重、群/私聊/管理员 3 层 RBAC、DSSuperAgent 短期检索授权、同 WorkItem 多步附件继承与 `work/inputs/<execution_id>/` 原件交付已实现（不再按步骤即删，受工作区 15 天留存策略统一管理）。 | `app/knowledge/`、`app/workspace_retention.py`、`docs/09-knowledge-base.md` |
 | Event Envelope | 模型和契约已实现；渠道校验/幂等待适配器落实。 | `app/models.py`、`contracts/event-envelope.md` |
 | Control Plane | SQLite 状态、审批、审计、发布和 Outbox 基础已实现。 | `app/control_plane.py`、`app/store.py` |
 | DSSuperAgent Adapter / Workflow | Step 4 已验收；默认提出计划，不自动执行。 | `app/dssuperagent.py`、`app/assistant_workflow.py` |
-| Execution Dispatcher / DSH Adapter | Step 3 真实 DSH 执行已验收。 | `app/execution.py`、`app/dsh.py` |
-| Workspace Manager / Runtime | WSL2 核心执行与恢复已验收；完整系统资源配额待完善。 | `app/workspace.py`、`app/workspace_runtime.py` |
+| Execution Dispatcher / DSH Adapter | Step 3 真实 DSH 执行已验收；已支持空闲/压缩/软上限与产物/答复契约缺失或模型 DSML/thinking 泄漏后的同会话 `--session-id` 自动补全收尾、输出脱敏及分级 MCP 隔离注入。 | `app/execution.py`、`app/dsh.py`、`app/reply_contract.py`、`app/mcp_registry.py` |
+| Workspace Manager / Runtime | WSL2 核心执行与恢复、15 天会话文件留存与过期清理（默认 15 天，范围 1–365 天，管理台可调并支持文件列表/在线下载）已实现；完整系统资源配额待完善。 | `app/workspace.py`、`app/workspace_retention.py`、`app/workspace_runtime.py` |
 | Memory | 有模型和持久化基础；完整检索与使用流程待完善。 | `app/models.py`、`app/store.py` |
 | Identity Registry | 已支持内部用户创建、平台 ID 绑定/解绑、群级及全局解析；真实 QQ 账号绑定待部署操作验收。 | `app/identity.py`、`app/store.py` |
 | Attachment Ingestor | 支持稳定附件 ID、原件先保存、状态恢复和后台 OCR/AnythingLLM 入库；真实 QQ 下载/解析仍需部署验收。 | `app/attachments.py`、`docs/08-management-modules.md` |
 | Scheduler / Resume Handler | UTC 持久化、时区转换、到期轮询、失败重试和服务重启恢复已接线；唤醒交给 DSSuperAgent 判断，不自动授权执行。 | `app/scheduler.py`、`app/scheduled_resume.py` |
-| Tools / Data Sources | `dsh.task` 和 Workspace 内 Shell/Python 已有；DSH 官方 `tool-web` 现由控制台开关控制。真实联网查询仍需在部署环境验收。 | `app/dsh.py`、`app/runtime_config.py` |
+| Tools / Data Sources | `dsh.task`、Workspace 内 Shell/Python 与 `shared-tools` 组件库已实现；DSH 官方 `tool-web` 与受控 MCP 服务挂载（按 `admin`/`internal`/`common` 会话层级过滤并经 `controlled-mcp.mjs` 桥接 `@deepseek-ai/dsh-mcp-client`，`bash` 沙箱保持断网并 `--unsetenv` 擦除密钥）均已接线，控制台可查看与启停。真实外部 MCP 业务接口待按具体后端挂载验收。 | `app/dsh.py`、`app/mcp_registry.py`、`app/dsh_plugins/controlled-mcp.mjs`、`app/runtime_config.py` |
 | Admin Console | 已提供 loopback 认证控制台及用户、绑定、日程、联网设置、状态、用量和审计 API。 | `app/admin_api.py`、`web/index.html` |
 | Outbox 投递 | 已接入 QQ 发送 API、白名单检查、失败重试与人工解决未知发送状态；真实群发送未验收。 | `app/control_plane.py`、`app/qq_channel.py` |
 

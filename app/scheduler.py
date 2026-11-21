@@ -38,15 +38,15 @@ class ScheduleService:
         due = parse_due_time(due_at, time_zone)
         if not source_event_id.strip() or not work_item_id.strip() or not resume_prompt.strip():
             raise ValueError("source_event_id, work_item_id and resume_prompt are required")
-        if not self.store.connection.execute("SELECT 1 FROM events WHERE event_id=?", (source_event_id,)).fetchone():
+        if not self.store.fetchone("SELECT 1 FROM events WHERE event_id=?", (source_event_id,)):
             raise ValueError("source event does not exist")
-        if not self.store.connection.execute("SELECT 1 FROM work_items WHERE work_item_id=?", (work_item_id,)).fetchone():
+        if not self.store.fetchone("SELECT 1 FROM work_items WHERE work_item_id=?", (work_item_id,)):
             raise ValueError("work item does not exist")
         if len(resume_prompt) > 4000:
             raise ValueError("resume_prompt exceeds 4000 characters")
         if context is None:
-            source = self.store.connection.execute("SELECT payload FROM events WHERE event_id=?",
-                                                   (source_event_id,)).fetchone()
+            source = self.store.fetchone("SELECT payload FROM events WHERE event_id=?",
+                                         (source_event_id,))
             if source:
                 event = self.store.decode(source[0])
                 content = event.get("content", "")
@@ -74,9 +74,9 @@ class ScheduleService:
         return item
 
     def list(self, *, limit: int = 200) -> list[ScheduledTask]:
-        rows = self.store.connection.execute(
+        rows = self.store.fetchall(
             "SELECT * FROM scheduled_tasks ORDER BY due_at LIMIT ?", (max(1, min(limit, 500)),)
-        ).fetchall()
+        )
         return [_row(row) for row in rows]
 
     def recover_interrupted(self) -> int:

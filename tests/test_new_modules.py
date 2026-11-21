@@ -48,6 +48,30 @@ class IdentityRegistryTests(unittest.TestCase):
         self.assertTrue(self.users.resolve(provider="qq", account_id="app", scope_id="group-1",
                                            external_id="member").startswith("external:qq:app:group-1:"))
 
+    def test_roles_groups_and_one_time_bind_codes(self):
+        admin = self.users.create_user("Boss", role="admin")
+        emp = self.users.create_user("Worker", role="employee")
+        cust = self.users.create_user("Client")
+        self.assertEqual(admin.role, "admin")
+        self.assertEqual(emp.role, "employee")
+        self.assertEqual(cust.role, "customer")
+        self.assertEqual(self.users.set_user_role(cust.user_id, "employee").role, "employee")
+
+        issued = self.users.create_bind_code(emp.user_id)
+        redeemed = self.users.redeem_bind_code(issued["code"], provider="qq", account_id="app", external_id="ext-1")
+        self.assertEqual(redeemed["user_id"], emp.user_id)
+        self.assertEqual(self.users.resolve(provider="qq", account_id="app", scope_id="g1", external_id="ext-1"),
+                         emp.user_id)
+        with self.assertRaisesRegex(ValueError, "already been used"):
+            self.users.redeem_bind_code(issued["code"], provider="qq", account_id="app", external_id="ext-2")
+
+        g = self.users.register_group_seen("qq.group", "g-1")
+        self.assertEqual(g.tier, "client_group")
+        updated = self.users.update_group(source_id="g-1", tier="internal", downward_compat="off", display_name="Dev")
+        self.assertEqual(updated.tier, "internal")
+        self.assertEqual(updated.downward_compat, "off")
+        self.assertEqual(updated.display_name, "Dev")
+
     def test_invalid_timezone_and_binding_to_missing_user_are_rejected(self):
         with self.assertRaises(ValueError):
             self.users.create_user("Alice", time_zone="Mars/Olympus")
@@ -298,6 +322,44 @@ class AdminApiTests(unittest.TestCase):
             self.assertEqual(trace["outbox"][0]["status"], "pending")
             plane.close()
 
+    def test_message_trace_keeps_running_status_when_only_ack_is_sent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plane = ControlPlane.open(Path(directory) / "control.sqlite")
+            try:
+                event = self._seed_trace(plane)
+                plane.create_work_item(work_item_id="work-ack-1", title="长任务", objective="调研",
+                                       source_event_ids=[event.event_id], completion_conditions=["完成"],
+                                       risk_class="low", owner_ref=event.actor_id)
+                plane.propose_work_item("work-ack-1")
+                plane.accept_work_item("work-ack-1")
+                plane.queue_work_item("work-ack-1")
+                plane.create_plan(plan_id="plan-ack-1", work_item_id="work-ack-1",
+                                  steps=[PlanStep("step-ack-1", 1, "执行", capability="dsh.task")])
+                plane.create_execution_request(execution_id="execution-ack-1", work_item_id="work-ack-1",
+                                               plan_step_id="step-ack-1", workspace_id="workspace-ack-1",
+                                               capability="dsh.task", parameters={"prompt": "process"})
+                plane.save_assistant_run(AssistantRun(event_id=event.event_id, status="executing",
+                                                      policy_version="test-policy", conversation_id=event.conversation_id,
+                                                      thread_id="thread-1", work_item_id="work-ack-1",
+                                                      plan_id="plan-ack-1", execution_ids=["execution-ack-1"],
+                                                      workspace_id="workspace-ack-1"))
+                plane.start_execution("execution-ack-1")
+                ack_decision = plane.decide_publication(
+                    decision_id="ack-decision-1", work_item_id="work-ack-1",
+                    conversation_id=event.conversation_id, disposition="group_update",
+                    reason="ack", policy_version="test-policy", body="已收到任务",
+                    idempotency_key=f"qq-ack:{event.event_id}",
+                    destination={"channel": "qq", "group_openid": "group-1"},
+                )
+                plane.mark_outbox_attempt(ack_decision.outbox_id)
+                plane.mark_outbox_sent(ack_decision.outbox_id)
+                trace = trace_for_event(plane.store, event.event_id)
+                self.assertEqual(trace["status"], "dsh_running")
+                self.assertEqual(trace["status_label"], "DSH 正在执行")
+                self.assertEqual(trace["outbox"][0]["kind"], "ack")
+            finally:
+                plane.close()
+
     def test_api_requires_bearer_token_and_returns_control_state(self):
         with tempfile.TemporaryDirectory() as directory:
             plane = ControlPlane.open(Path(directory) / "control.sqlite")
@@ -396,6 +458,209 @@ class AdminApiTests(unittest.TestCase):
                     server.server_close()
                 for thread in threads:
                     thread.join(timeout=2)
+                plane.close()
+
+    def test_admin_api_manages_roles_groups_bind_codes_compat_shares_and_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plane = ControlPlane.open(Path(directory) / "control.sqlite")
+            from app.knowledge.config import KnowledgeSettings
+            from app.knowledge.service import KnowledgeService
+
+            class FakeLLM:
+                def ensure_workspace(self, _slug): return "w"
+                def upload_document(self, _path, _name, **_kwargs): return "doc-loc-1"
+                def upload_text_file(self, _w, _p, *, source_name): return "d"
+                def upload_binary_file(self, _w, _p, *, source_name, content_type): return "d"
+                def search(self, _w, _q, *, limit=8): return []
+
+            ks = KnowledgeService(plane.store, KnowledgeSettings("http://127.0.0.1", "k", "s" * 40),
+                                  Path(directory) / "knowledge", FakeLLM())
+            note_doc = ks.ingest_internal_text(actor_id="emp-1", title="sop", text="internal handbook")
+            server = HTTPServer(("127.0.0.1", 0), make_handler(plane, Path(directory), "admin-tok", knowledge_service=ks))
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            def call(path, method="GET", body=None):
+                req = Request(
+                    base + path,
+                    data=json.dumps(body).encode() if body is not None else None,
+                    method=method,
+                    headers={"Authorization": "Bearer admin-tok", "Content-Type": "application/json"},
+                )
+                with urlopen(req, timeout=2) as resp:
+                    return json.loads(resp.read())
+
+            try:
+                user = call("/api/users", "POST", {"display_name": "Alice", "role": "employee"})
+                self.assertEqual(user["role"], "employee")
+                promoted = call("/api/users/role", "PUT", {"user_id": user["user_id"], "role": "admin"})
+                self.assertEqual(promoted["role"], "admin")
+                code_resp = call("/api/bind-codes", "POST", {"user_id": user["user_id"]})
+                self.assertIn("-", code_resp["code"])
+
+                grp = call("/api/groups", "PUT", {
+                    "source_id": "g-vip", "tier": "internal", "downward_compat": "off", "display_name": "VIP群",
+                })
+                self.assertEqual(grp["group"]["tier"], "internal")
+                self.assertEqual(call("/api/groups")["groups"][0]["display_name"], "VIP群")
+
+                self.assertTrue(call("/api/settings/downward-compat")["enabled"])
+                self.assertFalse(call("/api/settings/downward-compat", "PUT", {"enabled": False})["enabled"])
+                self.assertFalse(call("/api/status")["downward_compatibility_enabled"])
+
+                shared = call("/api/knowledge/shares", "POST", {
+                    "target_kind": "document", "target_id": note_doc["document_id"],
+                    "target_scope_type": "group", "target_scope_id": "client-g1", "note": "manual share",
+                })["share"]
+                self.assertEqual(len(call("/api/knowledge/shares")["shares"]), 1)
+                self.assertTrue(call("/api/knowledge/shares?share_id=" + shared["share_id"], "DELETE")["removed"])
+
+                saved_tool = call("/api/tools/scripts", "POST", {
+                    "layer": "common", "name": "ping.sh", "content": "#!/bin/sh\necho pong\n", "description": "ping",
+                })["script"]
+                self.assertEqual(saved_tool["name"], "ping.sh")
+                self.assertEqual(call("/api/tools/script?layer=common&name=ping.sh")["name"], "ping.sh")
+                self.assertTrue(call("/api/tools/scripts?layer=common&name=ping.sh", "DELETE")["removed"])
+
+                status_payload = call("/api/status")
+                self.assertIn("recent_dsh", status_payload)
+                self.assertIn("knowledge_summary", status_payload)
+                users_payload = call("/api/users")
+                self.assertIn("seen_external_actors", users_payload)
+                knowledge_payload = call("/api/knowledge")
+                self.assertIn("attachments", knowledge_payload)
+                logs_payload = call("/api/logs?entity_type=chat_group")
+                self.assertTrue(all(item["entity_type"] == "chat_group" for item in logs_payload["logs"]))
+                self.assertTrue(logs_payload["logs"][0]["label"])
+
+                from app.workspace import WorkspaceManager
+                ws_mgr = WorkspaceManager(Path(directory) / "workspaces")
+                ws_mgr.provision("ws-dsh-test", tier="internal")
+                ws_mgr.append_log(
+                    "ws-dsh-test",
+                    "dsh/exec_dsh_1.events.jsonl",
+                    json.dumps({"type": "tool_call", "tool": "bash", "input": {"command": "echo hi"}}) + "\n",
+                )
+                ws_mgr.save_execution_record("ws-dsh-test", {
+                    "execution_id": "exec_dsh_1",
+                    "runtime": "dsh",
+                    "status": "succeeded",
+                    "result": {
+                        "execution_id": "exec_dsh_1",
+                        "status": "succeeded",
+                        "output": "done ok",
+                        "log_paths": ["logs/dsh/exec_dsh_1.events.jsonl"],
+                        "artifact_paths": ["artifacts/step-01.md"],
+                        "metadata": {"tools_used": ["bash"]},
+                    },
+                })
+                dsh_logs = call("/api/workspace-logs?workspace_id=ws-dsh-test&execution_id=exec_dsh_1")
+                self.assertIn("[tool_call] bash", dsh_logs["stdout"])
+                self.assertIn("done ok", dsh_logs["stdout"])
+                self.assertEqual(dsh_logs["stderr"], "")
+
+                # Capability gaps API + bot behavior settings API
+                gap = plane.record_capability_gap(
+                    event_id="ev-gap-api-1",
+                    source_type="qq.group",
+                    source_id="g-vip",
+                    conversation_id="g-vip",
+                    group_tier="internal",
+                    topic="统计本月套餐利润率",
+                    summary="内部群聊到利润率遇冷",
+                    missing_capability="ERP 成本接入脚本",
+                    gap_kind="tool_script",
+                    suggested_solution="加入 calc_margin.py 后可自动产出报告",
+                )
+                gaps_resp = call("/api/capability-gaps")
+                self.assertEqual(gaps_resp["open_count"], 1)
+                self.assertEqual(gaps_resp["gaps"][0]["group_display_name"], "VIP群")
+                resolved_resp = call("/api/capability-gaps", "PUT", {
+                    "gap_id": gap["gap_id"], "status": "resolved", "resolution_note": "已添加 calc_margin.py",
+                })
+                self.assertEqual(resolved_resp["gap"]["status"], "resolved")
+                self.assertEqual(call("/api/capability-gaps?status=open")["open_count"], 0)
+
+                bot_cfg = call("/api/settings/bot-behavior", "PUT", {
+                    "ambient_listen_enabled": True,
+                    "ambient_cooldown_seconds": 3600,
+                    "bot_aliases": "憨憨, 智能助理",
+                })
+                self.assertTrue(bot_cfg["ambient_listen_enabled"])
+                self.assertEqual(bot_cfg["ambient_cooldown_seconds"], 3600.0)
+                self.assertEqual(bot_cfg["bot_aliases"], ["憨憨", "智能助理"])
+                self.assertEqual(call("/api/status")["bot_behavior"]["bot_aliases"], ["憨憨", "智能助理"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                plane.close()
+
+    def test_observability_conversations_sort_mixed_timezones_and_enrich_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plane = ControlPlane.open(Path(directory) / "control.sqlite")
+            try:
+                identities = IdentityRegistry(plane.store)
+                emp = identities.create_user("Zhang Employee", role="employee")
+                identities.bind(
+                    provider="qq", account_id="bot1", scope_id="grp-1",
+                    external_id="qq-emp-1", user_id=emp.user_id,
+                )
+                identities.update_group(
+                    source_type="qq.group", source_id="grp-1",
+                    tier="internal", downward_compat="off", display_name="研发内部群",
+                )
+                e1 = Event(
+                    event_id="qq:bot1:grp-1:m1",
+                    source_type="qq.group",
+                    source_id="grp-1",
+                    conversation_id="qq.group:grp-1",
+                    actor_id=emp.user_id,
+                    external_actor_id="qq-emp-1",
+                    content="早上的需求 (+08:00 10:00 = UTC 02:00)",
+                    occurred_at="2026-11-19T10:00:00+08:00",
+                    attachments=[],
+                    capabilities=["reply"],
+                )
+                e2 = Event(
+                    event_id="qq:bot1:grp-1:m2",
+                    source_type="qq.group",
+                    source_id="grp-1",
+                    conversation_id="qq.group:grp-1",
+                    actor_id=emp.user_id,
+                    external_actor_id="qq-emp-1",
+                    content="上午的需求 (+00:00 03:00 = +08:00 11:00)",
+                    occurred_at="2026-11-19T03:00:00+00:00",
+                    attachments=[],
+                    capabilities=["reply"],
+                )
+                plane.ingest_event(e1)
+                plane.ingest_event(e2)
+                plane.save_assistant_run(AssistantRun(
+                    event_id=e2.event_id,
+                    status="completed",
+                    policy_version="v1",
+                    workspace_id="qq-group-grp-1",
+                ))
+
+                tr = trace_for_event(plane.store, e2.event_id)
+                self.assertIsNotNone(tr)
+                self.assertEqual(tr["actor_display_name"], "Zhang Employee")
+                self.assertEqual(tr["actor_role"], "employee")
+                self.assertEqual(tr["group_display_name"], "研发内部群")
+                self.assertEqual(tr["group_tier"], "internal")
+                self.assertEqual(tr["downward_compat"], "off")
+                self.assertEqual(tr["workspace_id"], "qq-group-grp-1")
+
+                convs = list_conversations(plane.store, limit=10)
+                self.assertEqual(len(convs), 1)
+                self.assertEqual(convs[0]["label"], "研发内部群")
+                self.assertEqual(convs[0]["group_tier"], "internal")
+                self.assertEqual(convs[0]["workspace_id"], "qq-group-grp-1")
+                # Crucial: 03:00+00:00 (UTC 03:00) is LATER than 10:00+08:00 (UTC 02:00) even though lexicographically "03:" < "10:"
+                self.assertEqual([m["event_id"] for m in convs[0]["messages"]], [e1.event_id, e2.event_id])
+            finally:
                 plane.close()
 
 

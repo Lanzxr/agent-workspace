@@ -59,7 +59,120 @@ _AUDIT_LABELS = {
     ("outbox", "sent"): "回复发送成功",
     ("outbox", "failed"): "回复发送失败",
     ("outbox", "cancelled"): "回复已取消",
+    ("managed_user", "created"): "创建用户",
+    ("managed_user", "role_updated"): "修改用户角色",
+    ("managed_user", "bind_code_created"): "生成身份绑定码",
+    ("managed_user", "bind_code_redeemed"): "通过绑定码完成绑定",
+    ("identity_binding", "bound"): "绑定平台身份",
+    ("identity_binding", "unbound"): "解除身份绑定",
+    ("chat_group", "discovered"): "自动发现新群聊 (默认 L1)",
+    ("chat_group", "updated"): "更新群聊层级/配置",
+    ("knowledge_share", "shared"): "添加跨区显式授权分享",
+    ("knowledge_share", "unshared"): "撤销跨区分享",
+    ("setting", "web_search_enabled"): "切换 DSH 联网开关",
+    ("setting", "dssuperagent_web_search_enabled"): "切换 DSS 联网开关",
+    ("setting", "downward_compatibility_enabled"): "切换向下兼容开关",
+    ("setting", "ambient_listen_enabled"): "切换群聊旁听模式开关",
+    ("setting", "ambient_cooldown_seconds"): "调整群聊遇冷等待时间",
+    ("setting", "bot_aliases"): "更新机器人称呼别名",
+    ("capability_gap", "recorded"): "记录群聊能力提升需求",
+    ("capability_gap", "resolved"): "标记能力缺口已补齐",
+    ("capability_gap", "dismissed"): "忽略能力缺口记录",
+    ("capability_gap", "open"): "重新打开能力缺口",
 }
+
+
+def audit_label(entity_type: str, action: str, entity_id: str = "") -> str:
+    if (entity_type, entity_id) in _AUDIT_LABELS:
+        return _AUDIT_LABELS[(entity_type, entity_id)]
+    return _AUDIT_LABELS.get((entity_type, action), action)
+
+
+def _epoch(value: Any) -> float:
+    if not isinstance(value, str) or not value.strip():
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.timestamp()
+        return dt.timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _load_identity_context(store: Store) -> dict[str, Any]:
+    with store._transaction_lock:
+        users: dict[str, dict[str, str]] = {}
+        for row in store.connection.execute("SELECT user_id,display_name,role,status FROM managed_users"):
+            users[row["user_id"]] = {
+                "display_name": row["display_name"],
+                "role": row["role"],
+                "status": row["status"],
+            }
+        bindings: dict[tuple[str, str, str], str] = {}
+        for row in store.connection.execute("SELECT provider,account_id,scope_id,external_id,user_id FROM identity_bindings"):
+            bindings[(row["scope_id"], row["external_id"], row["provider"])] = row["user_id"]
+        groups: dict[str, dict[str, str]] = {}
+        for row in store.connection.execute("SELECT scope_key,display_name,tier,downward_compat,notes FROM chat_groups"):
+            groups[row["scope_key"]] = {
+                "display_name": row["display_name"],
+                "tier": row["tier"],
+                "downward_compat": row["downward_compat"],
+                "notes": row["notes"],
+            }
+        return {"users": users, "bindings": bindings, "groups": groups}
+
+
+def _resolve_actor_meta(ctx: dict[str, Any], *, actor_id: str, external_actor_id: str | None,
+                        source_type: str, source_id: str) -> tuple[str, str]:
+    users = ctx["users"]
+    if actor_id in users:
+        info = users[actor_id]
+        return info["display_name"], info["role"]
+    ext = external_actor_id or ""
+    if not ext and actor_id.startswith("external:"):
+        parts = actor_id.split(":", 4)
+        if len(parts) == 5:
+            ext = parts[4]
+    if ext:
+        bindings = ctx["bindings"]
+        scope = source_id if source_type == "qq.group" else "*"
+        uid = bindings.get((scope, ext, "qq")) or bindings.get(("*", ext, "qq"))
+        if uid and uid in users:
+            info = users[uid]
+            return info["display_name"], info["role"]
+        return f"未绑定 ({ext[:8]}…)" if len(ext) > 10 else f"未绑定 ({ext})", "customer"
+    return actor_id or "未知用户", "customer"
+
+
+def _resolve_scene_meta(ctx: dict[str, Any], *, source_type: str, source_id: str,
+                        actor_role: str) -> dict[str, str]:
+    if source_type in {"qq.group", "qq.guild"}:
+        grp = ctx["groups"].get(f"{source_type}:{source_id}", {})
+        tier = grp.get("tier") or "client_group"
+        compat = grp.get("downward_compat") or "inherit"
+        display_name = grp.get("display_name") or ""
+        tier_label = "内部群 L2" if tier == "internal" else "客户群 L1"
+        return {
+            "group_display_name": display_name,
+            "group_tier": tier,
+            "downward_compat": compat,
+            "tier_label": tier_label,
+        }
+    if source_type in {"qq.c2c", "qq.direct", "qq.private"}:
+        if actor_role == "admin":
+            tier_label, tier = "管理员私聊 L3", "admin"
+        elif actor_role == "employee":
+            tier_label, tier = "员工私聊 L2", "internal"
+        else:
+            tier_label, tier = "客户私聊 L1", "direct"
+        return {
+            "group_display_name": "",
+            "group_tier": tier,
+            "downward_compat": "inherit",
+            "tier_label": tier_label,
+        }
+    return {"group_display_name": "", "group_tier": "internal", "downward_compat": "inherit", "tier_label": source_type or "内部"}
 
 
 def _decode(store: Store, value: str) -> dict[str, Any]:
@@ -104,11 +217,11 @@ def _execution_rows(store: Store, execution_ids: list[str]) -> list[dict[str, An
     if not execution_ids:
         return []
     placeholders = ",".join("?" for _ in execution_ids)
-    rows = store.connection.execute(
+    rows = store.fetchall(
         f"SELECT execution_id,work_item_id,payload,status,created_at,updated_at "
         f"FROM executions WHERE execution_id IN ({placeholders}) ORDER BY created_at",
         execution_ids,
-    ).fetchall()
+    )
     return [{
         "execution_id": row["execution_id"],
         "work_item_id": row["work_item_id"],
@@ -122,13 +235,14 @@ def _execution_rows(store: Store, execution_ids: list[str]) -> list[dict[str, An
 
 
 def _outbox_rows_for_event(store: Store, event_id: str) -> list[dict[str, Any]]:
-    rows = store.connection.execute(
-        "SELECT outbox_id,payload,status,created_at FROM outbox "
-        "WHERE idempotency_key IN (?, ?) ORDER BY created_at",
-        (f"qq-publication:{event_id}", f"qq-processing-failure:{event_id}"),
-    ).fetchall()
+    rows = store.fetchall(
+        "SELECT outbox_id,idempotency_key,payload,status,created_at FROM outbox "
+        "WHERE idempotency_key IN (?, ?, ?) ORDER BY created_at",
+        (f"qq-ack:{event_id}", f"qq-publication:{event_id}", f"qq-processing-failure:{event_id}"),
+    )
     return [{
         "outbox_id": row["outbox_id"],
+        "kind": "ack" if str(row["idempotency_key"]).startswith("qq-ack:") else "reply",
         "status": row["status"],
         "body": _row_payload(store, row).get("body", ""),
         "destination": _safe_payload(_row_payload(store, row).get("destination", {})),
@@ -142,11 +256,11 @@ def _audit_for_ids(store: Store, ids: list[tuple[str, str]]) -> list[dict[str, A
         return []
     clauses = " OR ".join("(entity_type = ? AND entity_id = ?)" for _ in ids)
     parameters = [value for pair in ids for value in pair]
-    rows = store.connection.execute(
+    rows = store.fetchall(
         f"SELECT audit_id,entity_type,entity_id,action,payload,created_at FROM audit "
         f"WHERE {clauses} ORDER BY audit_id",
         parameters,
-    ).fetchall()
+    )
     return [{
         "audit_id": row["audit_id"],
         "entity_type": row["entity_type"],
@@ -160,13 +274,14 @@ def _audit_for_ids(store: Store, ids: list[tuple[str, str]]) -> list[dict[str, A
 
 def _current_state(run: dict[str, Any] | None, executions: list[dict[str, Any]],
                    outbox: list[dict[str, Any]]) -> tuple[str, str]:
-    if any(item["status"] == "failed" for item in outbox):
+    final_outbox = [item for item in outbox if item.get("kind") != "ack"]
+    if any(item["status"] == "failed" for item in final_outbox):
         return "failed", "回复发送失败"
-    if any(item["status"] == "sending" for item in outbox):
+    if any(item["status"] == "sending" for item in final_outbox):
         return "sending", "正在发送回复"
-    if any(item["status"] == "pending" for item in outbox):
+    if any(item["status"] == "pending" for item in final_outbox):
         return "reply_pending", "等待发送回复"
-    if outbox and all(item["status"] == "sent" for item in outbox):
+    if final_outbox and all(item["status"] == "sent" for item in final_outbox):
         return "completed", "回复已发送"
     if executions:
         latest = executions[-1]
@@ -178,26 +293,27 @@ def _current_state(run: dict[str, Any] | None, executions: list[dict[str, Any]],
     return "received", "已收到，等待处理"
 
 
-def trace_for_event(store: Store, event_id: str) -> dict[str, Any] | None:
-    row = store.connection.execute(
+def trace_for_event(store: Store, event_id: str, *, _ctx: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    row = store.fetchone(
         "SELECT event_id,payload,created_at FROM events WHERE event_id = ?", (event_id,)
-    ).fetchone()
+    )
     if row is None:
         return None
+    ctx = _ctx or _load_identity_context(store)
     event = _decode(store, row["payload"])
-    run_row = store.connection.execute(
+    run_row = store.fetchone(
         "SELECT payload,status,created_at,updated_at FROM assistant_runs WHERE event_id = ?", (event_id,)
-    ).fetchone()
+    )
     run = _row_payload(store, run_row)
     if run is not None:
         run["status"] = run_row["status"]
         run["created_at"] = run_row["created_at"]
         run["updated_at"] = run_row["updated_at"]
     work_item_id = run.get("work_item_id") if run else None
-    work_row = store.connection.execute(
+    work_row = store.fetchone(
         "SELECT work_item_id,payload,status,created_at,updated_at FROM work_items WHERE work_item_id = ?",
         (work_item_id,),
-    ).fetchone() if work_item_id else None
+    ) if work_item_id else None
     work = _row_payload(store, work_row)
     if work is not None:
         work.update({"work_item_id": work_row["work_item_id"], "status": work_row["status"],
@@ -213,14 +329,30 @@ def trace_for_event(store: Store, event_id: str) -> dict[str, Any] | None:
     timeline = _audit_for_ids(store, ids)
     status, status_label = _current_state(run, executions, outbox)
     error = (run or {}).get("error") or next((item.get("last_error") for item in outbox if item.get("last_error")), None)
+    source_type = event.get("source_type", "")
+    source_id = event.get("source_id", "")
+    actor_id = event.get("actor_id", "")
+    external_actor_id = event.get("external_actor_id")
+    actor_display_name, actor_role = _resolve_actor_meta(
+        ctx, actor_id=actor_id, external_actor_id=external_actor_id,
+        source_type=source_type, source_id=source_id,
+    )
+    scene = _resolve_scene_meta(ctx, source_type=source_type, source_id=source_id, actor_role=actor_role)
+    workspace_id = next((e.get("workspace_id") for e in reversed(executions) if e.get("workspace_id")), None) or (
+        (run or {}).get("workspace_id")
+    )
     return {
         "event_id": event_id,
         "trace_id": event_id,
         "conversation_id": event.get("conversation_id", ""),
-        "source_type": event.get("source_type", ""),
-        "source_id": event.get("source_id", ""),
-        "actor_id": event.get("actor_id", ""),
-        "external_actor_id": event.get("external_actor_id"),
+        "source_type": source_type,
+        "source_id": source_id,
+        "actor_id": actor_id,
+        "actor_display_name": actor_display_name,
+        "actor_role": actor_role,
+        "external_actor_id": external_actor_id,
+        "workspace_id": workspace_id,
+        **scene,
         "content": event.get("content", ""),
         "attachments": _safe_payload(event.get("attachments", [])),
         "occurred_at": event.get("occurred_at") or row["created_at"],
@@ -236,36 +368,54 @@ def trace_for_event(store: Store, event_id: str) -> dict[str, Any] | None:
     }
 
 
-def _conversation_label(source_type: str, source_id: str) -> str:
+def _conversation_label(source_type: str, source_id: str, *, group_name: str = "", actor_name: str = "") -> str:
     if source_type == "qq.group":
-        return f"QQ 群聊 · {source_id}"
+        return group_name or f"QQ 群 · {source_id[:12]}"
     if source_type == "qq.c2c":
-        return f"QQ 私聊 · {source_id}"
-    return source_type or source_id or "未命名会话"
+        if actor_name and not actor_name.startswith("未绑定"):
+            return f"QQ 私聊 · {actor_name}"
+        return f"QQ 私聊 · {source_id[:12]}"
+    return group_name or source_type or source_id or "未命名会话"
 
 
 def list_conversations(store: Store, *, limit: int = 50) -> list[dict[str, Any]]:
-    rows = store.connection.execute(
+    ctx = _load_identity_context(store)
+    rows = store.fetchall(
         "SELECT event_id FROM events ORDER BY created_at DESC LIMIT ?", (max(1, min(limit * 10, 500)),)
-    ).fetchall()
+    )
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
-        trace = trace_for_event(store, row["event_id"])
+        trace = trace_for_event(store, row["event_id"], _ctx=ctx)
         if trace is None:
             continue
         conversation_id = trace["conversation_id"]
+        label = _conversation_label(
+            trace["source_type"], trace["source_id"],
+            group_name=trace["group_display_name"],
+            actor_name=trace["actor_display_name"],
+        )
         group = grouped.setdefault(conversation_id, {
             "conversation_id": conversation_id,
-            "label": _conversation_label(trace["source_type"], trace["source_id"]),
+            "label": label,
             "source_type": trace["source_type"],
             "source_id": trace["source_id"],
+            "group_tier": trace["group_tier"],
+            "downward_compat": trace["downward_compat"],
+            "tier_label": trace["tier_label"],
+            "workspace_id": trace["workspace_id"],
             "last_activity_at": trace["occurred_at"],
             "messages": [],
         })
+        if label and not group["label"].endswith(label) and not trace["actor_display_name"].startswith("未绑定") and trace["source_type"] == "qq.c2c":
+            group["label"] = label
+        if trace["workspace_id"] and not group["workspace_id"]:
+            group["workspace_id"] = trace["workspace_id"]
         group["messages"].append({
             "id": trace["event_id"],
             "kind": "user",
             "actor_id": trace["actor_id"],
+            "actor_display_name": trace["actor_display_name"],
+            "actor_role": trace["actor_role"],
             "content": trace["content"],
             "attachments": trace["attachments"],
             "occurred_at": trace["occurred_at"],
@@ -278,6 +428,8 @@ def list_conversations(store: Store, *, limit: int = 50) -> list[dict[str, Any]]
                 "id": reply["outbox_id"],
                 "kind": "agent",
                 "actor_id": "company-agent",
+                "actor_display_name": "Company Agent",
+                "actor_role": "system",
                 "content": reply["body"],
                 "attachments": [],
                 "occurred_at": reply["created_at"],
@@ -286,12 +438,15 @@ def list_conversations(store: Store, *, limit: int = 50) -> list[dict[str, Any]]
                 "event_id": trace["event_id"],
                 "outbox_id": reply["outbox_id"],
             })
-        group["last_activity_at"] = max(group["last_activity_at"], *(item["occurred_at"] for item in group["messages"]))
+        group["last_activity_at"] = max(
+            [group["last_activity_at"], *(item["occurred_at"] for item in group["messages"])],
+            key=_epoch,
+        )
     conversations = list(grouped.values())
     for group in conversations:
-        group["messages"].sort(key=lambda item: item["occurred_at"])
+        group["messages"].sort(key=lambda item: (_epoch(item["occurred_at"]), 0 if item["kind"] == "user" else 1))
         group["messages"] = group["messages"][-100:]
         group["latest_status"] = next((item["status_label"] for item in reversed(group["messages"])
                                         if item["kind"] == "user"), "")
-    conversations.sort(key=lambda item: item["last_activity_at"], reverse=True)
+    conversations.sort(key=lambda item: _epoch(item["last_activity_at"]), reverse=True)
     return conversations[:limit]

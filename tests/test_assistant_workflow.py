@@ -283,9 +283,13 @@ class AssistantWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.artifact_refs, [f"artifacts/executions/{run.execution_ids[0]}/step-01-result.md"])
         request = self.plane.get_execution(run.execution_ids[0])
-        self.assertEqual(request.parameters["timeout_seconds"], 300)
+        self.assertEqual(request.parameters["timeout_seconds"], 3600.0)
+        self.assertEqual(request.parameters["idle_timeout_seconds"], 600.0)
+        self.assertEqual(request.parameters["compaction_timeout_seconds"], 600.0)
         self.assertTrue(request.parameters["require_user_reply"])
         self.assertIn(f"COMPANY_AGENT_FINAL_REPLY_BEGIN:{run.execution_ids[0]}", request.parameters["prompt"])
+        self.assertIn("bash 沙箱断网隔离", request.parameters["prompt"])
+        self.assertIn("web_fetch / web_search", request.parameters["prompt"])
         self.assertIn("Company Agent 负责向 QQ 用户发送结果", request.parameters["prompt"])
         self.assertEqual(run.execution_results[0]["output"], result.output[:4000])
         self.assertEqual((self.manager.get("assistant-workspace").root / "work/launch-count.txt").read_text(), "run\n")
@@ -332,6 +336,215 @@ class AssistantWorkflowTests(unittest.TestCase):
         self.assertEqual(completed.status, "completed")
         self.assertEqual(self.plane.get_work_item(work_item_id).status, "completed")
         self.assertEqual(self.plane.get_approval("approval-1").status, "approved")
+
+    def test_on_execution_started_callback_runs_before_dispatcher(self) -> None:
+        order: list[str] = []
+
+        class RecordingDispatcher:
+            knowledge_service = None
+
+            def dispatch(self, execution_id: str):
+                order.append("dispatch")
+                return ExecutionResult(execution_id, "succeeded", artifact_refs=[])
+
+        workflow = DssuperAgentWorkflow(
+            self.plane,
+            self.upstream,
+            manager=self.manager,
+            dispatcher=RecordingDispatcher(),
+            policy=AssistantPolicy(auto_execute_capabilities=frozenset({"dsh.task"})),
+            on_execution_started=lambda event, run, item: order.append(f"ack:{event.event_id}:{item.title}"),
+        )
+        run = workflow.process_event(self.event(), workspace_id="assistant-workspace")
+        self.assertEqual(run.status, "completed")
+        self.assertEqual(order, ["ack:event-1:Analyze the discussion", "dispatch"])
+
+    def test_context_includes_bot_replies_capability_summary_respects_tier_and_records_gap(self) -> None:
+        from app.identity import IdentityRegistry
+        from app.shared_tools import SharedToolsManager
+
+        tools = SharedToolsManager(self.root / "shared-tools")
+        tools.save_script("common", "pub.sh", "#!/bin/sh\necho ok\n", description="public helper")
+        tools.save_script("internal", "calc_margin.py", "print(1)\n", description="internal margin calc")
+
+        identities = IdentityRegistry(self.plane.store)
+        identities.update_group(source_type="qq.group", source_id="room-1", tier="client_group")
+
+        # Capturing upstream that records kwargs
+        calls: list[dict] = []
+
+        class InspectUpstream:
+            def __init__(self, decision):
+                self.decision = decision
+
+            def submit_event(self, event, *, context=None, interaction_mode=None, available_capabilities=None):
+                calls.append({
+                    "event": event,
+                    "context": context,
+                    "interaction_mode": interaction_mode,
+                    "available_capabilities": available_capabilities,
+                })
+                return DssuperAgentReceipt("stored", f"company-agent:{event.event_id}",
+                                           f"company-agent:{event.conversation_id}")
+
+            def wait_for_decision(self, _tk, tid, *, timeout=120):
+                return self.decision
+
+        gap_decision = DssuperAgentDecision(
+            decision_id="dec-gap",
+            trigger_ids=["company-agent:event-gap-1"],
+            thread_key="company-agent:conversation-1",
+            kind="ignore",
+            outcome="ignore",
+            reason="Company Agent retains control",
+            occurred_at="2026-11-19T00:00:00Z",
+            strength="inferred",
+            assistant_intent={
+                "action": "observe",
+                "rationale": "Missing script in client tier",
+                "completion_conditions": [],
+                "plan_steps": [],
+                "capability_gap": {
+                    "topic": "套餐利润率核算",
+                    "summary": "群内询问利润率",
+                    "missing_capability": "calc_margin.py 未对当前区开放",
+                    "gap_kind": "tool_script",
+                    "suggested_solution": "授予或开放对应脚本后可自动计算",
+                },
+                "publication": {"recommendation": "suppress", "reason": "Stay silent"},
+            },
+        )
+        ev1 = Event(
+            "event-gap-1", "qq.group", "room-1", "conversation-1", "member-1",
+            "2026-11-19T00:00:00Z", "这个月利润率怎么算？", [], ["dsh.task"],
+        )
+        wf = DssuperAgentWorkflow(
+            self.plane, InspectUpstream(gap_decision), manager=self.manager,
+            dispatcher=RecordingDispatcherForTest(self.plane, self.manager),
+            shared_tools=tools,
+        )
+        run1 = wf.process_event(ev1, workspace_id="ws-c1", interaction_mode="ambient_cooldown")
+        self.assertEqual(run1.status, "observed")
+        # Client group must NEVER see internal layer scripts in available_capabilities
+        caps = calls[-1]["available_capabilities"]
+        self.assertEqual(caps["tier"], "client_group")
+        self.assertIn("common", caps["shared_tools"])
+        self.assertNotIn("internal", caps["shared_tools"])
+        self.assertEqual(calls[-1]["interaction_mode"], "ambient_cooldown")
+        gaps = self.plane.list_capability_gaps(status="open")
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(gaps[0]["topic"], "套餐利润率核算")
+
+        # Promote group -> internal and simulate bot reply saved in outbox for ev1, then verify follow-up context sees bot reply & internal tools!
+        identities.update_group(source_type="qq.group", source_id="room-1", tier="internal")
+        self.plane.decide_publication(
+            decision_id="pub-ev1",
+            work_item_id=None,
+            conversation_id=run1.conversation_id or "conversation-1",
+            disposition="group_update",
+            reason="bot replied",
+            policy_version=wf.policy.version,
+            body="机器人上一条回复：请提供月份。",
+            idempotency_key=f"qq-publication:{ev1.event_id}",
+            destination={"channel": "qq", "group_openid": "room-1"},
+        )
+        ev2 = Event(
+            "event-followup-2", "qq.group", "room-1", "conversation-1", "member-1",
+            "2026-11-19T00:01:00Z", "11月份的", [], ["dsh.task"],
+        )
+        wf.upstream = InspectUpstream(DssuperAgentDecision(
+            decision_id="dec-ok",
+            trigger_ids=["company-agent:event-followup-2"],
+            thread_key="company-agent:conversation-1",
+            kind="ignore",
+            outcome="ignore",
+            reason="Company Agent retains control",
+            occurred_at="2026-11-19T00:01:00Z",
+            strength="explicit",
+            assistant_intent={
+                "action": "observe",
+                "rationale": "Direct reply",
+                "completion_conditions": [],
+                "plan_steps": [],
+                "publication": {"recommendation": "group_update", "reason": "Answer directly", "body": "收到11月份"},
+            },
+        ))
+        wf.process_event(ev2, workspace_id="ws-int-1", interaction_mode="direct")
+        ctx = calls[-1]["context"]
+        self.assertTrue(any(c.get("role") == "assistant" and "请提供月份" in c["content"] for c in ctx))
+        caps2 = calls[-1]["available_capabilities"]
+        self.assertEqual(caps2["tier"], "internal")
+        self.assertIn("internal", caps2["shared_tools"])
+
+    def test_multistep_plan_reuses_worker_session_id_and_enforces_ambient_silent_ack(self) -> None:
+        self.manager.provision("ws-multi")
+        decision = DssuperAgentDecision(
+            decision_id="dec-multi",
+            trigger_ids=["company-agent:ev-multi"],
+            thread_key="company-agent:conv-multi",
+            kind="ignore",
+            outcome="ignore",
+            reason="Two milestone phases needed",
+            occurred_at="2026-11-19T12:00:00Z",
+            strength="inferred",
+            assistant_intent={
+                "action": "propose_work",
+                "rationale": "Gather then report silently",
+                "title": "两阶段静默汇总",
+                "objective": "Gather and compile report",
+                "completion_conditions": ["Stage 1 done", "Stage 2 report done"],
+                "plan_steps": [
+                    {"title": "Stage 1", "objective": "Collect metrics", "capability": "dsh.task",
+                     "completion_conditions": ["Metrics collected"]},
+                    {"title": "Stage 2", "objective": "Write report", "capability": "dsh.task",
+                     "completion_conditions": ["Final report written"]},
+                ],
+                "publication": {"recommendation": "group_update", "reason": "Deliver proactive summary"},
+            },
+        )
+        upstream = FakeDssuperAgent(decision=decision)
+        dispatched_params: list[dict[str, object]] = []
+
+        class SessionTrackingDispatcher:
+            knowledge_service = None
+
+            def __init__(self, plane):
+                self.plane = plane
+
+            def dispatch(self, execution_id: str):
+                req = self.plane.get_execution(execution_id)
+                dispatched_params.append(dict(req.parameters))
+                sid = f"worker-sess-{len(dispatched_params)}" if not req.parameters.get("resume_session_id") else str(req.parameters["resume_session_id"])
+                return ExecutionResult(
+                    execution_id, "succeeded", artifact_refs=list(req.parameters.get("expected_artifacts", [])),
+                    metadata={"session_id": sid},
+                )
+
+        wf = DssuperAgentWorkflow(
+            self.plane, upstream, manager=self.manager,
+            dispatcher=SessionTrackingDispatcher(self.plane),
+            policy=AssistantPolicy(auto_execute_capabilities=frozenset({"dsh.task"})),
+        )
+        ev = Event("ev-multi", "qq.group", "grp-m", "conv-multi", "u1", "2026-11-19T12:00:00Z", "群讨论汇总", [], ["dsh.task"])
+        run = wf.process_event(ev, workspace_id="ws-multi", interaction_mode="ambient_cooldown")
+        self.assertEqual(run.status, "completed")
+        self.assertTrue(run.publication.get("silent_ack"))
+        self.assertEqual(len(dispatched_params), 2)
+        self.assertFalse(dispatched_params[0]["require_user_reply"])
+        self.assertNotIn("resume_session_id", dispatched_params[0])
+        self.assertTrue(dispatched_params[1]["require_user_reply"])
+        self.assertEqual(dispatched_params[1]["resume_session_id"], "worker-sess-1")
+
+
+class RecordingDispatcherForTest:
+    knowledge_service = None
+
+    def __init__(self, plane, manager):
+        self.plane = plane
+        self.manager = manager
+
+    def dispatch(self, execution_id: str):
+        return ExecutionResult(execution_id, "succeeded", artifact_refs=[])
 
 
 if __name__ == "__main__":

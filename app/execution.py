@@ -12,6 +12,7 @@ from .execution_state import private_directory, write_private_json
 from .models import ExecutionRequest, ExecutionResult
 from .runtime_config import POLICY_VERSION
 from .workspace import WorkspaceManager, validate_execution_id
+from .workspace_retention import touch_workspace_files
 from .knowledge.delivery import KnowledgeDelivery
 from .knowledge.service import KnowledgeService
 
@@ -87,21 +88,20 @@ class ExecutionDispatcher:
                                                                list(task.knowledge_document_ids),
                                                                list(task.attachment_ids))
                         references = "\n".join(f"- `{item.relative_path}` ({item.filename})" for item in staged)
+                        touch_workspace_files(self.manager, workspace.workspace_id,
+                                              [item.relative_path for item in staged])
                         task = replace(task, prompt=(task.prompt + "\n\nApproved reference files staged in this workspace:\n"
                                                      + references))
-                    result = self.adapter.execute(request, workspace, task, lease_fd=lease.fileno())
+                    result = self.adapter.execute(request, workspace, task, lease_fd=lease.fileno(),
+                                                  workspace_tier=getattr(workspace, "tier", "client_group"))
                 except Exception as error:
                     result = ExecutionResult(
                         execution_id, "failed", error=self.adapter.config.redact(f"Execution failed: {type(error).__name__}: {error}"),
                         metadata={"workspace_id": workspace.workspace_id, "error_category": "adapter_error",
                                   "finished_at": self.plane.now(), "policy_version": POLICY_VERSION},
                     )
-                finally:
-                    if staged and self.knowledge_delivery:
-                        try:
-                            self.knowledge_delivery.cleanup(workspace, execution_id)
-                        except OSError:
-                            pass
+                # Retain staged work/inputs/<execution_id>/ files across multi-step plans and
+                # follow-up conversation turns; expired files are pruned by workspace retention TTL.
             else:
                 raise InvalidTransition(f"cannot dispatch execution in {request.status}")
             # Persist outside the Agent's writable root before changing task state.
