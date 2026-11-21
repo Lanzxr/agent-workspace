@@ -250,6 +250,66 @@ class Store:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS knowledge_grants_expiry_idx ON knowledge_grants(expires_at);
+            CREATE TABLE IF NOT EXISTS forge_allowed_domains (
+                domain TEXT PRIMARY KEY,
+                allow_subdomains INTEGER NOT NULL DEFAULT 0,
+                note TEXT NOT NULL DEFAULT '',
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS forge_tools (
+                tool_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                visibility TEXT NOT NULL DEFAULT 'admin',
+                operation_type TEXT NOT NULL DEFAULT 'read',
+                active_version INTEGER NOT NULL DEFAULT 0,
+                latest_version INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                description TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS forge_tool_versions (
+                tool_id TEXT NOT NULL REFERENCES forge_tools(tool_id),
+                version INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                definition_json TEXT NOT NULL,
+                test_report_json TEXT,
+                code_hash TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                approved_by TEXT,
+                created_at TEXT NOT NULL,
+                approved_at TEXT,
+                PRIMARY KEY(tool_id, version)
+            );
+            CREATE TABLE IF NOT EXISTS forge_proposals (
+                proposal_id TEXT PRIMARY KEY,
+                tool_id TEXT NOT NULL,
+                target_version INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                target_visibility TEXT NOT NULL,
+                requested_by TEXT NOT NULL,
+                source_conversation_id TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                decided_by TEXT,
+                reason TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                decided_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS forge_proposals_status_idx ON forge_proposals(status, created_at);
+            CREATE TABLE IF NOT EXISTS forge_call_logs (
+                call_id TEXT PRIMARY KEY,
+                tool_id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                caller_tier TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                ok INTEGER NOT NULL,
+                error_code TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS forge_call_logs_tool_idx ON forge_call_logs(tool_id, created_at);
             """
         )
         user_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(managed_users)")}

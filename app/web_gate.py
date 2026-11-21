@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
+from .ports import DEFAULT_SEARCH_PORT, DEFAULT_WEB_GATE_PORT, resolve_port_settings
 from .web_search import SearxngSearch
 
 from .runtime_config import RuntimeConfig
@@ -22,30 +23,25 @@ class WebGateSettings:
     """Loopback capability gate used by DSSuperAgent's controlled web tools."""
 
     host: str = "127.0.0.1"
-    port: int = 8767
+    port: int = DEFAULT_WEB_GATE_PORT
     api_key: str = ""
-    search_url: str = "http://127.0.0.1:8888/search"
+    search_url: str = f"http://127.0.0.1:{DEFAULT_SEARCH_PORT}/search"
     search_timeout_seconds: float = 20.0
     owner: str = "admin"
 
     @classmethod
     def load(cls, path: Path) -> "WebGateSettings":
         values = RuntimeConfig._parse_env(path) if path.is_file() else {}
-        host = (values.get("COMPANY_AGENT_WEB_GATE_HOST") or "127.0.0.1").strip()
-        raw_port = (values.get("COMPANY_AGENT_WEB_GATE_PORT") or "8767").strip()
-        try:
-            port = int(raw_port)
-        except ValueError as error:
-            raise ValueError("COMPANY_AGENT_WEB_GATE_PORT must be an integer") from error
-        if not 1 <= port <= 65535:
-            raise ValueError("COMPANY_AGENT_WEB_GATE_PORT must be between 1 and 65535")
+        ports = resolve_port_settings(values)
+        host = ports.web_gate_host
+        port = ports.web_gate_port
         if host not in {"127.0.0.1", "localhost"}:
             raise ValueError("COMPANY_AGENT_WEB_GATE_HOST must bind to loopback")
         api_key = (values.get("COMPANY_AGENT_WEB_GATE_API_KEY")
                    or values.get("COMPANY_AGENT_KNOWLEDGE_API_KEY") or "").strip()
         if api_key and len(api_key) < 32:
             raise ValueError("COMPANY_AGENT_WEB_GATE_API_KEY must contain at least 32 characters")
-        search_url = (values.get("COMPANY_AGENT_WEB_SEARCH_URL") or "http://127.0.0.1:8888/search").strip()
+        search_url = ports.web_search_url
         parsed_search_url = urlsplit(search_url)
         if (parsed_search_url.scheme not in {"http", "https"} or not parsed_search_url.hostname
                 or parsed_search_url.username or parsed_search_url.password or parsed_search_url.query

@@ -25,6 +25,7 @@ from .knowledge.service import KnowledgeService
 from .models import Event, OutboxMessage
 from .reply_contract import extract_final_reply
 from .runtime_config import QQBotSettings
+from .tool_forge import ForgeSecretsVault, ToolForgeError, ToolForgeService
 from .workspace_retention import resolve_workspace_file, touch_workspace_files
 
 QQ_GROUP_AND_C2C_MESSAGE_INTENT = 1 << 25
@@ -398,7 +399,9 @@ class QQChannelService:
                  attachment_ingestor: AttachmentIngestor | None = None,
                  knowledge_service: KnowledgeService | None = None,
                  workspace_manager: Any | None = None,
-                 admin_user_ids: frozenset[str] | None = None):
+                 admin_user_ids: frozenset[str] | None = None,
+                 tool_forge: ToolForgeService | None = None,
+                 forge_secrets_vault: ForgeSecretsVault | None = None):
         self.plane = plane
         self.workflow = workflow
         self.api = api
@@ -407,6 +410,10 @@ class QQChannelService:
         self.knowledge_service = knowledge_service
         self.workspace_manager = workspace_manager
         self.admin_user_ids = admin_user_ids
+        self.tool_forge = tool_forge
+        self.forge_secrets_vault = forge_secrets_vault
+        self._ephemeral_secrets_lock = threading.Lock()
+        self._ephemeral_forge_secrets: dict[str, tuple[str, str]] = {}
         self.attachment_ingestor = attachment_ingestor or AttachmentIngestor(
             plane.store, knowledge_service=knowledge_service
         )
@@ -468,11 +475,26 @@ class QQChannelService:
         if normalized is None:
             return
         event, destination = normalized
+        raw_content = event.content.strip()
+        secret_pair: tuple[str, str] | None = None
+        if raw_content.lower().startswith("/forge-secret"):
+            sec_parts = raw_content.split(None, 3)
+            if len(sec_parts) >= 4 and sec_parts[1].lower() == "set":
+                secret_pair = (sec_parts[2], sec_parts[3])
+                redacted = f"/forge-secret set {sec_parts[2]} [REDACTED]"
+                event = Event(
+                    event.event_id, event.source_type, event.source_id, event.conversation_id,
+                    event.actor_id, event.occurred_at, redacted, event.attachments,
+                    event.capabilities, external_actor_id=event.external_actor_id,
+                )
         external_actor_id = event.actor_id
         try:
             saved_event = self.plane.get_event(event.event_id)
         except NotFound:
             saved_event = None
+        if saved_event is None and secret_pair is not None:
+            with self._ephemeral_secrets_lock:
+                self._ephemeral_forge_secrets[event.event_id] = secret_pair
         if saved_event is not None:
             if (saved_event.source_type != event.source_type or saved_event.source_id != event.source_id
                     or saved_event.conversation_id != event.conversation_id
@@ -755,6 +777,173 @@ class QQChannelService:
         manager.provision(workspace_id, tier=tier)
         return workspace_id
 
+    def _is_admin_dm(self, event: Event) -> bool:
+        return event.source_type in {"qq.c2c", "qq.direct", "qq.private"} and self.identities.is_admin(
+            event.actor_id, self._env_admin_ids()
+        )
+
+    def _get_tool_forge(self) -> ToolForgeService | None:
+        if self.tool_forge is not None:
+            return self.tool_forge
+        if self.forge_secrets_vault is not None:
+            self.tool_forge = ToolForgeService(
+                self.plane,
+                secrets_vault=self.forge_secrets_vault,
+                shared_tools=getattr(self.workflow, "shared_tools", None),
+            )
+            return self.tool_forge
+        if self.workspace_manager is not None and hasattr(self.workspace_manager, "base_directory"):
+            data_dir = Path(self.workspace_manager.base_directory).parent
+            self.tool_forge = ToolForgeService(
+                self.plane,
+                secrets_vault=ForgeSecretsVault(data_dir / "forge-secrets.json"),
+                shared_tools=getattr(self.workflow, "shared_tools", None),
+            )
+            return self.tool_forge
+        return None
+
+    def _handle_forge_command(self, event: Event, cmd: str, arg: str) -> str:
+        # Always pop ephemeral plaintext immediately so it never stays in memory on rejection or error.
+        ephemeral = None
+        with self._ephemeral_secrets_lock:
+            ephemeral = self._ephemeral_forge_secrets.pop(event.event_id, None)
+        if cmd == "/forge-secret" and ephemeral is None:
+            parts_raw = arg.split(None, 2)
+            if len(parts_raw) == 3 and parts_raw[0].lower() == "set":
+                ephemeral = (parts_raw[1], parts_raw[2])
+                try:
+                    self.plane.redact_event_content(event.event_id, f"/forge-secret set {parts_raw[1]} [REDACTED]")
+                except (NotFound, ValueError):
+                    pass
+
+        if event.source_type not in {"qq.c2c", "qq.direct", "qq.private"}:
+            return "安全隔离限制：Tool Forge 域名/凭据管理与工具上线审批仅允许管理员在本人的 QQ 私聊窗口执行，群聊内一律禁止。"
+        if not self.identities.is_admin(event.actor_id, self._env_admin_ids()):
+            return "权限不足：仅企业管理员 (L3) 可操作 Tool Forge。"
+        forge = self._get_tool_forge()
+        if forge is None:
+            return "当前服务未启用 Tool Forge 运行时。"
+        actor = f"qq:{event.actor_id}"
+
+        try:
+            if cmd in {"/forge", "/forge-help"}:
+                return (
+                    "Tool Forge 管理员私聊指令：\n"
+                    "- /forge-domain list | add <域名> [--subdomains] | del <域名>\n"
+                    "- /forge-secret list | set <ALIAS> <SECRET> | del <ALIAS>\n"
+                    "- /forge-proposals （查看待审批发布提案）\n"
+                    "- /forge-approve <proposal_id> | /forge-reject <proposal_id> [原因]\n"
+                    "- /forge-tools | /forge-enable <tool_id> | /forge-disable <tool_id> | /forge-rollback <tool_id> [vN]"
+                )
+            if cmd == "/forge-domain":
+                tokens = arg.split()
+                sub = tokens[0].lower() if tokens else "list"
+                if sub == "list":
+                    domains = forge.list_domains()
+                    if not domains:
+                        return "当前联网域名白名单为空（所有自定义工具外网请求都会被拦截）。添加示例：/forge-domain add api.example.com"
+                    lines = ["当前允许自定义工具访问的外部域名："]
+                    for d in domains:
+                        flag = "（含子域名）" if d.get("allow_subdomains") else ""
+                        lines.append(f"- {d['domain']}{flag}")
+                    return "\n".join(lines)
+                if sub == "add" and len(tokens) >= 2:
+                    allow_sub = "--subdomains" in tokens[2:] or "--sub" in tokens[2:]
+                    entry = forge.add_domain(tokens[1], allow_subdomains=allow_sub, created_by=actor)
+                    return f"已加入外网白名单：{entry['domain']}{'（含子域名）' if entry['allow_subdomains'] else ''}。"
+                if sub in {"del", "remove"} and len(tokens) >= 2:
+                    removed = forge.remove_domain(tokens[1], actor=actor)
+                    return f"已移出外网白名单：{tokens[1]}。" if removed else f"白名单中未找到域名：{tokens[1]}。"
+                return "用法：/forge-domain list | add <域名> [--subdomains] | del <域名>"
+
+            if cmd == "/forge-secret":
+                tokens = arg.split(None, 2)
+                sub = tokens[0].lower() if tokens else "list"
+                if sub == "list":
+                    items = forge.list_secrets_metadata()
+                    if not items:
+                        return "当前凭据保险库为空。添加示例：/forge-secret set APIZENO_KEY <密钥>"
+                    lines = ["已配置的外部凭据别名（仅管理员主机侧持有明文，员工群及 AI 沙箱均不可见）："]
+                    for item in items:
+                        lines.append(f"- {item['name']} ({item.get('preview', '***')}, length={item.get('length', 0)})")
+                    return "\n".join(lines)
+                if sub == "set":
+                    pair = ephemeral or ((tokens[1], tokens[2]) if len(tokens) >= 3 else None)
+                    if pair is None:
+                        return "用法：/forge-secret set <SECRET_ALIAS> <SECRET_VALUE>"
+                    meta = forge.set_secret(pair[0], pair[1], actor=actor)
+                    return f"已加密保存凭据 {meta['name']}（原始私聊消息已脱敏；员工群与 DSH 沙箱均无法读取明文）。"
+                if sub in {"del", "remove"} and len(tokens) >= 2:
+                    ok = forge.delete_secret(tokens[1], actor=actor)
+                    return f"已删除凭据：{tokens[1]}。" if ok else f"未找到凭据：{tokens[1]}。"
+                return "用法：/forge-secret list | set <ALIAS> <VALUE> | del <ALIAS>"
+
+            if cmd == "/forge-proposals":
+                pending = forge.list_proposals(status="pending", limit=20)
+                if not pending:
+                    return "当前没有待审批的工具发布提案。"
+                lines = ["待审批工具发布提案："]
+                for p in pending:
+                    domains = ", ".join(p.get("allowed_domains") or []) or "无外网"
+                    secrets = ", ".join(p.get("secret_refs") or []) or "无密钥"
+                    lines.append(
+                        f"- {p['proposal_id']} | {p['tool_id']}@v{p['target_version']} ({p['kind']}, {p['operation_type']})\n"
+                        f"  可见范围: {p['target_visibility']} | 域名: {domains} | 凭据: {secrets}\n"
+                        f"  说明: {p['summary']}\n"
+                        f"  批准指令: /forge-approve {p['proposal_id']}"
+                    )
+                return "\n".join(lines)
+
+            if cmd == "/forge-approve":
+                pid = arg.strip().split()[0] if arg.strip() else ""
+                if not pid:
+                    return "用法：/forge-approve <proposal_id>"
+                res = forge.approve_proposal(pid, decided_by=actor, is_admin=True)
+                target_note = "已写入 shared-tools" if res["kind"] == "shared_script" else "已热挂载至对应层级 MCP，立即可用"
+                return f"已批准上线：{res['tool_id']}@v{res['active_version']} -> {res['visibility']}（{target_note}，无需重启服务）。"
+
+            if cmd == "/forge-reject":
+                parts_r = arg.strip().split(None, 1)
+                if not parts_r:
+                    return "用法：/forge-reject <proposal_id> [拒绝原因]"
+                res = forge.reject_proposal(parts_r[0], decided_by=actor, is_admin=True, reason=parts_r[1] if len(parts_r) > 1 else "")
+                return f"已驳回提案 {res['proposal_id']}（{res['tool_id']}）。"
+
+            if cmd == "/forge-tools":
+                tools = forge.list_tools()
+                if not tools:
+                    return "当前尚未创建任何 Tool Forge 工具。你可以在管理员私聊直接让我接入接口、试跑并生成可复用工具。"
+                lines = ["Tool Forge 已登记工具："]
+                for t in tools[:25]:
+                    st = t.get("stats") or {}
+                    status = "启用中" if (t["enabled"] and t["active_version"] > 0) else ("已停用" if t["active_version"] > 0 else "未发布草稿")
+                    lines.append(
+                        f"- {t['tool_id']} (active=v{t['active_version']}/latest=v{t['latest_version']}, {t['visibility']}, {status}, 调用 {st.get('ok_calls', 0)}/{st.get('calls', 0)} 均耗 {st.get('avg_ms', 0)}ms)"
+                    )
+                return "\n".join(lines)
+
+            if cmd in {"/forge-enable", "/forge-disable"}:
+                tid = arg.strip().split()[0] if arg.strip() else ""
+                if not tid:
+                    return f"用法：{cmd} <tool_id>"
+                res = forge.set_tool_enabled(tid, enabled=(cmd == "/forge-enable"), actor=actor)
+                return f"已{'启用' if res['enabled'] else '停用'}工具 {res['tool_id']}（active=v{res['active_version']}）。"
+
+            if cmd == "/forge-rollback":
+                parts_rb = arg.strip().split()
+                if not parts_rb:
+                    return "用法：/forge-rollback <tool_id> [目标版本号，如 v1]"
+                target_ver = None
+                if len(parts_rb) >= 2:
+                    raw_v = parts_rb[1].lstrip("vV")
+                    target_ver = int(raw_v)
+                res = forge.rollback_tool(parts_rb[0], target_version=target_ver, actor=actor)
+                return f"已回滚工具 {res['tool_id']}：v{res['previous_version']} -> v{res['active_version']}（作用域 {res['visibility']} 已立即生效）。"
+
+            return "未知 Tool Forge 指令，请发送 /forge-help 查看完整用法。"
+        except (ToolForgeError, ValueError) as error:
+            return f"Tool Forge 操作失败：{error}"
+
     def _handle_slash_command(self, event: Event, destination: dict[str, str]) -> bool:
         raw = event.content.strip()
         if not raw:
@@ -762,7 +951,12 @@ class QQChannelService:
         parts = raw.split(None, 1)
         cmd = parts[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
-        if cmd not in {"/bind", "/mark-internal", "/mark-client", "/compat", "/whoami", "/internal", "/save-internal"}:
+        forge_commands = {
+            "/forge", "/forge-help", "/forge-domain", "/forge-secret", "/forge-proposals",
+            "/forge-approve", "/forge-reject", "/forge-tools", "/forge-enable",
+            "/forge-disable", "/forge-rollback",
+        }
+        if cmd not in ({"/bind", "/mark-internal", "/mark-client", "/compat", "/whoami", "/internal", "/save-internal"} | forge_commands):
             return False
         digest = hashlib.sha256(event.event_id.encode("utf-8")).hexdigest()[:24]
         idempotency_key = f"qq-publication:{event.event_id}"
@@ -844,6 +1038,8 @@ class QQChannelService:
                     actor_id=event.actor_id, title=arg[:40], text=arg, event_id=event.event_id,
                 )
                 reply = f"已存入企业内部共享知识库（{saved['filename']}），3 个内部群与员工均可检索使用。"
+        elif cmd in forge_commands:
+            reply = self._handle_forge_command(event, cmd, arg)
 
         if reply is None:
             return False

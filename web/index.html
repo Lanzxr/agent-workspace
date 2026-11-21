@@ -377,6 +377,38 @@
         </div>
       </div>
     </div>
+
+    <div class="card" id="toolForgeCard">
+      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px">
+        <h2 style="margin:0">动态工具工坊（Tool Forge — 对话试跑 / 审批上线 / 安全联网与密钥隔离）</h2>
+        <span id="forgePendingBadge" class="chip">0 待审批</span>
+      </div>
+      <p class="hint" style="margin:0 0 12px">L3 管理员在 QQ 私聊中让 AI 探针试跑、生成可复用 <code>http_api</code> / <code>python_plugin</code> / <code>shared_script</code> 工具并提交提案；经管理员本人在 QQ 私聊发 <code>/forge-approve &lt;proposal_id&gt;</code> 或在此审批后，自动热挂载至对应层级 MCP（<code>forge_admin</code> / <code>forge_internal</code> / <code>forge_common</code>），员工群与 AI 沙箱始终保持 <code>--unshare-net</code> 无网且无法接触明文密钥。</p>
+      <div class="grid-2" style="margin-bottom:14px">
+        <div class="card" style="margin:0">
+          <h3 style="margin-top:0">1. 外网域名白名单</h3>
+          <div class="bar" style="margin-bottom:8px">
+            <input id="forgeDomainInput" placeholder="如 api.example.com" style="min-width:190px">
+            <label class="toggle" style="font-size:12px"><input type="checkbox" id="forgeAllowSubdomains">含子域名</label>
+            <button class="primary sm" id="forgeAddDomainBtn">加入白名单</button>
+          </div>
+          <div id="forgeDomainsTable"></div>
+        </div>
+        <div class="card" style="margin:0">
+          <h3 style="margin-top:0">2. 隔离凭据保险库（宿主机 0600 加密存放）</h3>
+          <div class="bar" style="margin-bottom:8px">
+            <input id="forgeSecretNameInput" placeholder="别名如 APIZENO_KEY" style="min-width:140px">
+            <input id="forgeSecretValueInput" type="password" placeholder="密钥明文（保存后不再回显）" style="min-width:180px">
+            <button class="primary sm" id="forgeSaveSecretBtn">保存凭据</button>
+          </div>
+          <div id="forgeSecretsTable"></div>
+        </div>
+      </div>
+      <h3 style="margin-top:0">3. 工具发布审批队列</h3>
+      <div id="forgeProposalsTable" style="margin-bottom:16px"></div>
+      <h3 style="margin-top:0">4. 已登记动态工具与版本维护</h3>
+      <div id="forgeToolsTable"></div>
+    </div>
   </section>
 
   <!-- Tab 5B: 需求洞察与能力提升 -->
@@ -1031,6 +1063,75 @@ function mcpAccessBadge(level) {
   return '<span class="chip warn">仅管理员 (admin)</span>';
 }
 
+function renderForgeSection(summary) {
+  const data = summary || {};
+  state.forgeSummary = data;
+  const pendingCount = Number(data.pending_proposals || 0);
+  $('forgePendingBadge').textContent = `${pendingCount} 待审批`;
+  $('forgePendingBadge').className = `chip ${pendingCount > 0 ? 'warn' : 'done'}`;
+
+  const domains = data.domains || [];
+  $('forgeDomainsTable').innerHTML = domains.length
+    ? `<div class="table-wrap"><table><thead><tr><th>域名</th><th>子域匹配</th><th>操作</th></tr></thead><tbody>${domains.map(d => `
+      <tr>
+        <td><code>${esc(d.domain)}</code></td>
+        <td>${d.allow_subdomains ? '是' : '仅精确'}</td>
+        <td><button class="sm danger" data-forge-del-domain="${esc(d.domain)}">移除</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+    : '<p class="muted small">暂未允许任何外部域名（默认全部拦截）。</p>';
+
+  const secrets = data.secrets || [];
+  $('forgeSecretsTable').innerHTML = secrets.length
+    ? `<div class="table-wrap"><table><thead><tr><th>凭据别名</th><th>脱敏预览</th><th>操作</th></tr></thead><tbody>${secrets.map(s => `
+      <tr>
+        <td><code>{{${esc(s.name)}}}</code></td>
+        <td><code>${esc(s.preview || '***')}</code> (${esc(String(s.length || 0))})</td>
+        <td><button class="sm danger" data-forge-del-secret="${esc(s.name)}">删除</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+    : '<p class="muted small">暂无托管外部凭据。</p>';
+
+  const proposals = data.proposals || [];
+  $('forgeProposalsTable').innerHTML = proposals.length
+    ? `<div class="table-wrap"><table><thead><tr><th>提案与版本</th><th>可见性 / 域名 / 凭据</th><th>摘要与测试输出</th><th>状态</th><th>操作</th></tr></thead><tbody>${proposals.map(p => {
+        const testOk = p.test_report && p.test_report.ok;
+        const sample = p.test_report ? JSON.stringify(p.test_report.sample_output || p.test_report.error || '').slice(0, 140) : '未测试';
+        const actions = p.status === 'pending'
+          ? `<button class="sm primary" data-forge-approve="${esc(p.proposal_id)}">批准上线</button>
+             <button class="sm danger" data-forge-reject="${esc(p.proposal_id)}">驳回</button>`
+          : `<small class="muted">${esc(p.decided_by || '-')}</small>`;
+        return `<tr>
+          <td><strong><code>${esc(p.tool_id)}</code>@v${esc(String(p.target_version))}</strong><br><small class="muted">${esc(p.proposal_id)} · ${esc(p.kind)} · ${esc(p.operation_type)}</small></td>
+          <td>${mcpAccessBadge(p.target_visibility)}<br><small>域名: <code>${esc((p.allowed_domains || []).join(', ') || '无外网')}</code></small><br><small>凭据: <code>${esc((p.secret_refs || []).join(', ') || '无')}</code></small></td>
+          <td><div>${esc(p.summary || '')}</div><small class="${testOk ? '' : 'muted'}">${testOk ? '✓ 测试通过' : '测试记录'}: <code>${esc(sample)}</code></small><details style="margin-top:4px"><summary class="small muted">查看代码/配置预览</summary><pre style="max-height:180px;overflow:auto;font-size:11px">${esc(p.code_preview || '')}</pre></details></td>
+          <td>${chip(p.status === 'approved' ? 'done' : (p.status === 'pending' ? 'warn' : 'failed'), p.status)}</td>
+          <td style="white-space:nowrap">${actions}</td>
+        </tr>`;
+      }).join('')}</tbody></table></div>`
+    : '<p class="muted small">暂无工具发布提案。</p>';
+
+  const tools = data.tools || [];
+  $('forgeToolsTable').innerHTML = tools.length
+    ? `<div class="table-wrap"><table><thead><tr><th>工具 ID</th><th>作用域 / 类型</th><th>活跃版本</th><th>调用统计</th><th>状态</th><th>操作</th></tr></thead><tbody>${tools.map(t => {
+        const st = t.stats || {};
+        const statusChip = (t.enabled && t.active_version > 0)
+          ? chip('done', '已上线')
+          : (t.active_version > 0 ? chip('failed', '已停用') : chip('warn', '仅草稿'));
+        const hasPriorApproved = (t.versions || []).some(v => v.approved_at && Number(v.version) !== Number(t.active_version));
+        return `<tr>
+          <td><strong><code>${esc(t.tool_id)}</code></strong><br><small>${esc(t.description || '')}</small></td>
+          <td>${mcpAccessBadge(t.visibility)}<br><small>${esc(t.kind)} · ${esc(t.operation_type)}</small></td>
+          <td><code>v${esc(String(t.active_version))}</code> / 最新 <code>v${esc(String(t.latest_version))}</code></td>
+          <td>${esc(String(st.ok_calls || 0))}/${esc(String(st.calls || 0))} 次 · ${esc(String(st.avg_ms || 0))}ms</td>
+          <td>${statusChip}</td>
+          <td style="white-space:nowrap">
+            ${t.active_version > 0 ? `<button class="sm" data-forge-toggle="${esc(t.tool_id)}" data-forge-next="${t.enabled ? '0' : '1'}">${t.enabled ? '停用' : '启用'}</button>` : ''}
+            ${hasPriorApproved ? `<button class="sm" data-forge-rollback="${esc(t.tool_id)}">回滚上一版</button>` : ''}
+          </td>
+        </tr>`;
+      }).join('')}</tbody></table></div>`
+    : '<p class="muted small">暂无已注册动态工具。</p>';
+}
+
 function renderMcpServers(servers) {
   state.mcpServers = servers || [];
   const enabledCount = state.mcpServers.filter(s => s.enabled).length;
@@ -1164,7 +1265,7 @@ async function refresh() {
     renderMetrics(s);
     renderDshTables(s);
 
-    const [conv, u, b, t, w, l, g, dc, k, tools, mcpData, gapsData, botCfg, wsFiles, retentionCfg] = await Promise.all([
+    const [conv, u, b, t, w, l, g, dc, k, tools, mcpData, forgeData, gapsData, botCfg, wsFiles, retentionCfg] = await Promise.all([
       api('/api/conversations?limit=60'),
       api('/api/users'),
       api('/api/bindings'),
@@ -1176,6 +1277,7 @@ async function refresh() {
       api('/api/knowledge'),
       api('/api/tools'),
       api('/api/mcp-servers'),
+      api('/api/forge/summary'),
       api('/api/capability-gaps?limit=200'),
       api('/api/settings/bot-behavior'),
       api('/api/workspace-files?limit=150'),
@@ -1194,6 +1296,7 @@ async function refresh() {
     renderWorkspaceFiles(wsFiles.files || [], retentionCfg.retention_days ?? wsFiles.retention_days ?? 15);
     renderToolsSummary(tools);
     renderMcpServers(mcpData.servers || []);
+    renderForgeSection(forgeData);
     renderCapabilityGaps();
     renderSchedules(t.tasks || []);
     renderAuditLogs();
@@ -1572,6 +1675,52 @@ $('mcpServersTable').addEventListener('click', e => {
   if (delBtn) {
     const id = delBtn.dataset.mcpDel;
     runAction(() => api(`/api/mcp-servers?server_id=${encodeURIComponent(id)}`, 'DELETE'), `已移除控制台覆盖 ${id}`);
+  }
+});
+
+$('forgeAddDomainBtn').onclick = () => runAction(async () => {
+  await api('/api/forge/domains', 'POST', {
+    domain: $('forgeDomainInput').value.trim(),
+    allow_subdomains: $('forgeAllowSubdomains').checked,
+  });
+  $('forgeDomainInput').value = '';
+}, '已添加外网域名白名单');
+
+$('forgeSaveSecretBtn').onclick = () => runAction(async () => {
+  await api('/api/forge/secrets', 'POST', {
+    name: $('forgeSecretNameInput').value.trim(),
+    value: $('forgeSecretValueInput').value,
+  });
+  $('forgeSecretNameInput').value = '';
+  $('forgeSecretValueInput').value = '';
+}, '凭据已加密保存（明文不再回显）');
+
+$('toolForgeCard').addEventListener('click', e => {
+  const delDom = e.target.closest('button[data-forge-del-domain]');
+  if (delDom) {
+    return runAction(() => api('/api/forge/domains?domain=' + encodeURIComponent(delDom.dataset.forgeDelDomain), 'DELETE'), '已移出外网白名单');
+  }
+  const delSec = e.target.closest('button[data-forge-del-secret]');
+  if (delSec) {
+    return runAction(() => api('/api/forge/secrets?name=' + encodeURIComponent(delSec.dataset.forgeDelSecret), 'DELETE'), '已删除托管凭据');
+  }
+  const appBtn = e.target.closest('button[data-forge-approve]');
+  if (appBtn) {
+    return runAction(() => api('/api/forge/proposals/approve', 'POST', { proposal_id: appBtn.dataset.forgeApprove }), '工具已批准上线并热生效');
+  }
+  const rejBtn = e.target.closest('button[data-forge-reject]');
+  if (rejBtn) {
+    const reason = prompt('可选填写驳回原因：', '') ?? '';
+    return runAction(() => api('/api/forge/proposals/reject', 'POST', { proposal_id: rejBtn.dataset.forgeReject, reason }), '已驳回发布提案');
+  }
+  const togBtn = e.target.closest('button[data-forge-toggle]');
+  if (togBtn) {
+    const enabled = togBtn.dataset.forgeNext === '1';
+    return runAction(() => api('/api/forge/tools/enable', 'PUT', { tool_id: togBtn.dataset.forgeToggle, enabled }), enabled ? '已启用动态工具' : '已停用动态工具');
+  }
+  const rbBtn = e.target.closest('button[data-forge-rollback]');
+  if (rbBtn) {
+    return runAction(() => api('/api/forge/tools/rollback', 'POST', { tool_id: rbBtn.dataset.forgeRollback }), '已回滚至上一已审批版本');
   }
 });
 

@@ -138,6 +138,24 @@ class ControlPlane:
                         {"attachment_count": len(event.attachments)}, now)
         return event
 
+    def redact_event_content(self, event_id: str, redacted_content: str) -> None:
+        """Overwrite stored event text cleanly when a DM command carried a secret literal."""
+        current = self.get_event(event_id)
+        if current.content == redacted_content:
+            return
+        updated = Event(
+            current.event_id, current.source_type, current.source_id,
+            current.conversation_id, current.actor_id, current.occurred_at,
+            redacted_content, current.attachments, current.capabilities,
+            external_actor_id=current.external_actor_id,
+        )
+        with self.store.transaction() as connection:
+            connection.execute(
+                "UPDATE events SET payload=? WHERE event_id=?",
+                (self.store.encode(updated.to_dict()), event_id),
+            )
+            self._audit(connection, "event", event_id, "secret_redacted", {}, self.now())
+
     def create_conversation(
         self,
         *,
