@@ -26,6 +26,18 @@ from .models import source_identity_scope, source_provider
 from .observability import audit_label, list_conversations, trace_for_event
 from .ports import assert_port_available
 from .channel_core import DEFAULT_AMBIENT_COOLDOWN_SECONDS, DEFAULT_BOT_ALIASES
+from .qq_channel import QQBotAPI
+from .runtime_config import (
+    DEFAULT_MODEL_CONTEXT_WINDOW,
+    DEFAULT_MODEL_MAX_TOKENS,
+    QQBotSettings,
+    RuntimeConfig,
+    VALID_REASONING_EFFORTS,
+    WECOM_DEFAULT_WS_URL,
+    WeComBotSettings,
+    mask_secret,
+    update_runtime_env_file,
+)
 from .scheduler import ScheduleService
 from .scheduler import SchedulerWorker
 from .shared_tools import SharedToolsManager
@@ -50,7 +62,9 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str,
                  mcp_runtime_servers: tuple[McpServerSpec, ...] = (),
                  mcp_secrets: Mapping[str, str] | None = None,
                  tool_forge: ToolForgeService | None = None,
-                 forge_secrets_vault: ForgeSecretsVault | None = None):
+                 forge_secrets_vault: ForgeSecretsVault | None = None,
+                 config_path: Path | None = None):
+    resolved_config_path = (config_path or (Path.home() / ".config/company-agent/runtime.env")).expanduser().resolve()
     shared_tools_mgr = SharedToolsManager(data_directory / "shared-tools")
     forge_vault = forge_secrets_vault or ForgeSecretsVault(data_directory / "forge-secrets.json")
     forge_service = tool_forge or ToolForgeService(plane, secrets_vault=forge_vault, shared_tools=shared_tools_mgr)
@@ -613,6 +627,24 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str,
                     "min_days": MIN_WORKSPACE_RETENTION_DAYS,
                     "max_days": MAX_WORKSPACE_RETENTION_DAYS,
                 })
+            if path == "/api/settings/runtime-config" and method == "GET":
+                return self._send(200, _runtime_config_payload(plane, resolved_config_path))
+            if path == "/api/settings/model-config" and method == "PUT":
+                body = self._body()
+                payload = _save_model_config(plane, resolved_config_path, body)
+                return self._send(200, payload)
+            if path == "/api/settings/model-config/test" and method == "POST":
+                body = self._body()
+                result = _test_model_connection(resolved_config_path, body)
+                return self._send(200, result)
+            if path == "/api/settings/channel-config" and method == "PUT":
+                body = self._body()
+                payload = _save_channel_config(plane, resolved_config_path, body)
+                return self._send(200, payload)
+            if path == "/api/settings/channel-config/test" and method == "POST":
+                body = self._body()
+                result = _test_channel_connection(resolved_config_path, body)
+                return self._send(200, result)
             if path == "/api/workspace-files" and method == "GET":
                 query = parse_qs(urlsplit(self.path).query)
                 ws_filter = query.get("workspace_id", [""])[0].strip() or None
@@ -687,7 +719,8 @@ def serve(plane: ControlPlane, data_directory: Path, host: str, port: int, token
           mcp_runtime_servers: tuple[McpServerSpec, ...] = (),
           mcp_secrets: Mapping[str, str] | None = None,
           tool_forge: ToolForgeService | None = None,
-          forge_secrets_vault: ForgeSecretsVault | None = None) -> None:
+          forge_secrets_vault: ForgeSecretsVault | None = None,
+          config_path: Path | None = None) -> None:
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("admin console can only bind to loopback; use an authenticated reverse proxy for remote access")
     assert_port_available(host, port, service_name="Admin Console", env_var="COMPANY_AGENT_ADMIN_PORT")
@@ -701,6 +734,7 @@ def serve(plane: ControlPlane, data_directory: Path, host: str, port: int, token
             mcp_secrets=mcp_secrets,
             tool_forge=tool_forge,
             forge_secrets_vault=forge_secrets_vault,
+            config_path=config_path,
         ),
     )
     stop = threading.Event()
@@ -913,3 +947,389 @@ def _delete_mcp_override(plane: ControlPlane, server_id: str) -> bool:
     plane.set_setting("mcp_servers", filtered)
     plane.record_external_audit("mcp_server_deleted", {"server_id": server_id})
     return True
+
+
+def _load_env_safe(config_path: Path) -> dict[str, str]:
+    if not config_path.is_file():
+        return {}
+    try:
+        return RuntimeConfig._parse_env(config_path)
+    except ValueError:
+        return {}
+
+
+def _runtime_config_payload(plane: ControlPlane, config_path: Path) -> dict[str, Any]:
+    values = _load_env_safe(config_path)
+    primary_url = (values.get("AGENT_MODEL_URL") or values.get("DEEPSEEK_BASE_URL") or "").strip().rstrip("/")
+    primary_name = (values.get("AGENT_MODEL_NAME") or "").strip()
+    primary_key = (values.get("AGENT_MODEL_API_KEY") or values.get("DEEPSEEK_API_KEY") or "").strip()
+    try:
+        ctx_win = int((values.get("AGENT_MODEL_CONTEXT_WINDOW") or "").strip() or DEFAULT_MODEL_CONTEXT_WINDOW)
+    except ValueError:
+        ctx_win = DEFAULT_MODEL_CONTEXT_WINDOW
+    try:
+        max_tok = int((values.get("AGENT_MODEL_MAX_TOKENS") or "").strip() or min(DEFAULT_MODEL_MAX_TOKENS, ctx_win))
+    except ValueError:
+        max_tok = min(DEFAULT_MODEL_MAX_TOKENS, ctx_win)
+    reasoning = (values.get("AGENT_MODEL_REASONING_EFFORT") or "").strip().lower()
+    fb_name = (values.get("AGENT_MODEL_FALLBACK_NAME") or "").strip()
+    fb_url = (values.get("AGENT_MODEL_FALLBACK_URL") or "").strip().rstrip("/")
+    fb_key = (values.get("AGENT_MODEL_FALLBACK_API_KEY") or "").strip()
+
+    qq_app = (values.get("QQBOT_APP_ID") or values.get("QQBOT_APPID") or "").strip()
+    qq_secret = (values.get("QQBOT_CLIENT_SECRET") or values.get("QQBOT_SECRET") or "").strip()
+    qq_base_url = (values.get("QQBOT_API_BASE_URL") or "https://api.bot.qq.com").strip().rstrip("/")
+    qq_pubs = (values.get("QQBOT_ALLOWED_PUBLICATIONS") or "group_update").strip()
+    qq_auto = (values.get("QQBOT_AUTO_EXECUTE_CAPABILITIES") or "dsh.task").strip()
+    qq_ws = (values.get("COMPANY_AGENT_QQ_WORKSPACE") or "qq-default").strip()
+    qq_iso = (values.get("COMPANY_AGENT_QQ_ISOLATE_WORKSPACES") or "true").strip().lower() in {"1", "true", "yes", "on"}
+    qq_configured = bool(qq_app and qq_secret)
+
+    wc_id = (values.get("WECOM_BOT_ID") or values.get("COMPANY_AGENT_WECOM_BOT_ID") or "").strip()
+    wc_secret = (values.get("WECOM_BOT_SECRET") or values.get("COMPANY_AGENT_WECOM_BOT_SECRET") or "").strip()
+    wc_ws_url = (values.get("WECOM_WS_URL") or WECOM_DEFAULT_WS_URL).strip()
+    wc_pubs = (values.get("WECOM_ALLOWED_PUBLICATIONS") or "group_update").strip()
+    wc_auto = (values.get("WECOM_AUTO_EXECUTE_CAPABILITIES") or "dsh.task").strip()
+    wc_ws = (values.get("COMPANY_AGENT_WECOM_WORKSPACE") or "wecom-default").strip()
+    wc_iso = (values.get("COMPANY_AGENT_WECOM_ISOLATE_WORKSPACES") or "true").strip().lower() in {"1", "true", "yes", "on"}
+    wc_direct = (values.get("WECOM_GROUP_DIRECT_ON_CALLBACK") or "true").strip().lower() in {"1", "true", "yes", "on"}
+    wc_configured = bool(wc_id and wc_secret)
+
+    return {
+        "model": {
+            "url": primary_url,
+            "name": primary_name,
+            "api_key_configured": bool(primary_key),
+            "api_key_masked": mask_secret(primary_key),
+            "context_window": ctx_win,
+            "max_tokens": max_tok,
+            "reasoning_effort": reasoning,
+            "fallback_name": fb_name,
+            "fallback_url": fb_url,
+            "fallback_api_key_configured": bool(fb_key),
+            "fallback_api_key_masked": mask_secret(fb_key),
+        },
+        "channels": {
+            "qq": {
+                "configured": qq_configured,
+                "app_id": qq_app,
+                "client_secret_configured": bool(qq_secret),
+                "client_secret_masked": mask_secret(qq_secret),
+                "api_base_url": qq_base_url,
+                "allowed_publications": qq_pubs,
+                "auto_execute_capabilities": qq_auto,
+                "workspace_id": qq_ws,
+                "isolate_workspaces": qq_iso,
+                "gateway_state": _gateway_state(plane, "qq_gateway", configured=qq_configured),
+            },
+            "wecom": {
+                "configured": wc_configured,
+                "bot_id": wc_id,
+                "bot_secret_configured": bool(wc_secret),
+                "bot_secret_masked": mask_secret(wc_secret),
+                "ws_url": wc_ws_url,
+                "allowed_publications": wc_pubs,
+                "auto_execute_capabilities": wc_auto,
+                "workspace_id": wc_ws,
+                "isolate_workspaces": wc_iso,
+                "group_direct_on_callback": wc_direct,
+                "gateway_state": _gateway_state(plane, "wecom_gateway", configured=wc_configured),
+            },
+        },
+    }
+
+
+def _save_model_config(plane: ControlPlane, config_path: Path, body: Mapping[str, Any]) -> dict[str, Any]:
+    existing = _load_env_safe(config_path)
+    raw_url = str(body.get("url") or "").strip()
+    raw_name = str(body.get("name") or "").strip()
+    raw_key = str(body.get("api_key") or "").strip()
+    effective_key = raw_key or (existing.get("AGENT_MODEL_API_KEY") or existing.get("DEEPSEEK_API_KEY") or "").strip()
+    if not raw_url or not raw_name or not effective_key:
+        raise ValueError("主模型 API 地址、模型名称与 API Key 均不能为空")
+    url = RuntimeConfig._validate_model_url(raw_url, label="model URL")
+    if any(ch in raw_name + effective_key for ch in "\r\n\x00"):
+        raise ValueError("model name and API key must be single-line values")
+
+    try:
+        ctx_win = int(body.get("context_window") or DEFAULT_MODEL_CONTEXT_WINDOW)
+    except (TypeError, ValueError) as error:
+        raise ValueError("context_window must be an integer") from error
+    if not 4096 <= ctx_win <= 4_194_304:
+        raise ValueError("context_window must be between 4096 and 4194304")
+
+    try:
+        max_tok = int(body.get("max_tokens") or min(DEFAULT_MODEL_MAX_TOKENS, ctx_win))
+    except (TypeError, ValueError) as error:
+        raise ValueError("max_tokens must be an integer") from error
+    if not 512 <= max_tok <= min(2_097_152, ctx_win):
+        raise ValueError(f"max_tokens must be between 512 and {min(2_097_152, ctx_win)}")
+
+    reasoning = str(body.get("reasoning_effort") or "").strip().lower()
+    if reasoning and reasoning not in VALID_REASONING_EFFORTS:
+        raise ValueError("reasoning_effort must be one of: off, low, medium, high")
+
+    fb_name = str(body.get("fallback_name") or "").strip()
+    fb_url_raw = str(body.get("fallback_url") or "").strip()
+    fb_key_raw = str(body.get("fallback_api_key") or "").strip()
+    clear_fb_key = bool(body.get("clear_fallback_api_key", False))
+    if any(ch in fb_name + fb_key_raw for ch in "\r\n\x00"):
+        raise ValueError("fallback model name and API key must be single-line values")
+    fb_url = RuntimeConfig._validate_model_url(fb_url_raw, label="fallback model URL") if fb_url_raw else ""
+    if not fb_name:
+        effective_fb_key: str | None = None
+        effective_fb_url: str | None = None
+    else:
+        effective_fb_url = fb_url or None
+        if clear_fb_key:
+            effective_fb_key = None
+        elif fb_key_raw:
+            effective_fb_key = fb_key_raw
+        else:
+            effective_fb_key = (existing.get("AGENT_MODEL_FALLBACK_API_KEY") or "").strip() or None
+
+    updates: dict[str, str | None] = {
+        "AGENT_MODEL_URL": url,
+        "AGENT_MODEL_NAME": raw_name,
+        "AGENT_MODEL_API_KEY": effective_key,
+        "AGENT_MODEL_CONTEXT_WINDOW": str(ctx_win),
+        "AGENT_MODEL_MAX_TOKENS": str(max_tok),
+        "AGENT_MODEL_REASONING_EFFORT": reasoning or None,
+        "AGENT_MODEL_FALLBACK_NAME": fb_name or None,
+        "AGENT_MODEL_FALLBACK_URL": effective_fb_url,
+        "AGENT_MODEL_FALLBACK_API_KEY": effective_fb_key,
+    }
+    if "DEEPSEEK_BASE_URL" in existing:
+        updates["DEEPSEEK_BASE_URL"] = url
+    if "DEEPSEEK_API_KEY" in existing:
+        updates["DEEPSEEK_API_KEY"] = effective_key
+
+    update_runtime_env_file(config_path, updates)
+    RuntimeConfig.load(config_path)
+    plane.record_external_audit("model_config_updated", {
+        "model_url": url,
+        "model_name": raw_name,
+        "api_key_changed": bool(raw_key),
+        "context_window": ctx_win,
+        "max_tokens": max_tok,
+        "reasoning_effort": reasoning or None,
+        "fallback_name": fb_name or None,
+        "fallback_url": effective_fb_url,
+        "fallback_api_key_changed": bool(fb_key_raw),
+    })
+    return _runtime_config_payload(plane, config_path)
+
+
+def _test_model_connection(config_path: Path, body: Mapping[str, Any]) -> dict[str, Any]:
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    existing = _load_env_safe(config_path)
+    use_fallback = bool(body.get("test_fallback", False))
+    if use_fallback:
+        raw_url = str(body.get("fallback_url") or body.get("url") or existing.get("AGENT_MODEL_FALLBACK_URL") or existing.get("AGENT_MODEL_URL") or "").strip()
+        raw_name = str(body.get("fallback_name") or existing.get("AGENT_MODEL_FALLBACK_NAME") or "").strip()
+        raw_key = (
+            str(body.get("fallback_api_key") or "").strip()
+            or (existing.get("AGENT_MODEL_FALLBACK_API_KEY") or "").strip()
+            or str(body.get("api_key") or "").strip()
+            or (existing.get("AGENT_MODEL_API_KEY") or existing.get("DEEPSEEK_API_KEY") or "").strip()
+        )
+    else:
+        raw_url = str(body.get("url") or existing.get("AGENT_MODEL_URL") or existing.get("DEEPSEEK_BASE_URL") or "").strip()
+        raw_name = str(body.get("name") or existing.get("AGENT_MODEL_NAME") or "").strip()
+        raw_key = str(body.get("api_key") or "").strip() or (existing.get("AGENT_MODEL_API_KEY") or existing.get("DEEPSEEK_API_KEY") or "").strip()
+
+    if not raw_url or not raw_name or not raw_key:
+        raise ValueError("测试模型连通性需要填写 API 地址、模型名称与 API Key")
+    url = RuntimeConfig._validate_model_url(raw_url, label="model URL")
+    if any(ch in raw_name + raw_key for ch in "\r\n\x00"):
+        raise ValueError("model name and API key must be single-line values")
+
+    headers = {
+        "Authorization": f"Bearer {raw_key}",
+        "User-Agent": "company-agent-console/1.0",
+        "Accept": "application/json",
+    }
+    models_url = f"{url}/models"
+    try:
+        req = Request(models_url, headers=headers, method="GET")
+        with urlopen(req, timeout=8.0) as resp:
+            raw_data = json.loads(resp.read(262_144).decode("utf-8", errors="replace"))
+        items = raw_data.get("data") if isinstance(raw_data, dict) else None
+        model_ids = [
+            str(item.get("id")) for item in (items or [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+        listed = raw_name in model_ids
+        msg = (
+            f"模型接口连通成功，已确认模型 {raw_name} 在可用列表中（共 {len(model_ids)} 个模型）。"
+            if listed
+            else (
+                f"网关 /models 连通成功（返回 {len(model_ids)} 个模型），但未在列表中找到 {raw_name}；请确认模型名是否正确。"
+                if model_ids
+                else f"模型接口 {url} 连通成功。"
+            )
+        )
+        return {
+            "ok": True,
+            "url": url,
+            "model": raw_name,
+            "model_listed": listed,
+            "available_models": model_ids[:40],
+            "message": msg,
+        }
+    except HTTPError as http_err:
+        raise ValueError(f"模型接口返回 HTTP {http_err.code}：请检查 API 地址或密钥是否有效") from http_err
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as net_err:
+        raise ValueError(f"无法连接模型接口 {url}：{type(net_err).__name__}") from net_err
+
+
+def _save_channel_config(plane: ControlPlane, config_path: Path, body: Mapping[str, Any]) -> dict[str, Any]:
+    existing = _load_env_safe(config_path)
+    channel = str(body.get("channel") or "").strip().lower()
+    if channel == "qq":
+        app_id = str(body.get("app_id") or "").strip()
+        raw_secret = str(body.get("client_secret") or "").strip()
+        effective_secret = raw_secret or (existing.get("QQBOT_CLIENT_SECRET") or existing.get("QQBOT_SECRET") or "").strip()
+        if not app_id or not effective_secret:
+            raise ValueError("QQ 机器人 AppID 与 ClientSecret 均不能为空")
+        api_base_url = str(body.get("api_base_url") or "https://api.bot.qq.com").strip().rstrip("/")
+        allowed_pubs = str(body.get("allowed_publications") or "group_update").strip()
+        auto_exec = str(body.get("auto_execute_capabilities") if "auto_execute_capabilities" in body else "dsh.task").strip()
+        workspace_id = str(body.get("workspace_id") or "qq-default").strip()
+        isolate_ws = bool(body.get("isolate_workspaces", True))
+
+        updates: dict[str, str | None] = {
+            "QQBOT_APP_ID": app_id,
+            "QQBOT_CLIENT_SECRET": effective_secret,
+            "QQBOT_API_BASE_URL": api_base_url,
+            "QQBOT_ALLOWED_PUBLICATIONS": allowed_pubs,
+            "QQBOT_AUTO_EXECUTE_CAPABILITIES": auto_exec,
+            "COMPANY_AGENT_QQ_WORKSPACE": workspace_id,
+            "COMPANY_AGENT_QQ_ISOLATE_WORKSPACES": "true" if isolate_ws else "false",
+        }
+        if "QQBOT_APPID" in existing:
+            updates["QQBOT_APPID"] = app_id
+        if "QQBOT_SECRET" in existing:
+            updates["QQBOT_SECRET"] = effective_secret
+
+        update_runtime_env_file(config_path, updates)
+        QQBotSettings.load(config_path)
+        plane.record_external_audit("channel_config_updated", {
+            "channel": "qq",
+            "app_id": app_id,
+            "secret_changed": bool(raw_secret),
+            "api_base_url": api_base_url,
+            "allowed_publications": allowed_pubs,
+            "auto_execute_capabilities": auto_exec,
+            "workspace_id": workspace_id,
+            "isolate_workspaces": isolate_ws,
+        })
+        return _runtime_config_payload(plane, config_path)
+
+    if channel == "wecom":
+        bot_id = str(body.get("bot_id") or "").strip()
+        raw_secret = str(body.get("bot_secret") or "").strip()
+        effective_secret = raw_secret or (existing.get("WECOM_BOT_SECRET") or existing.get("COMPANY_AGENT_WECOM_BOT_SECRET") or "").strip()
+        if not bot_id or not effective_secret:
+            raise ValueError("企业微信 BotID 与 Secret 均不能为空")
+        ws_url = str(body.get("ws_url") or WECOM_DEFAULT_WS_URL).strip()
+        allowed_pubs = str(body.get("allowed_publications") or "group_update").strip()
+        auto_exec = str(body.get("auto_execute_capabilities") if "auto_execute_capabilities" in body else "dsh.task").strip()
+        workspace_id = str(body.get("workspace_id") or "wecom-default").strip()
+        isolate_ws = bool(body.get("isolate_workspaces", True))
+        group_direct = bool(body.get("group_direct_on_callback", True))
+
+        updates_wc: dict[str, str | None] = {
+            "WECOM_BOT_ID": bot_id,
+            "WECOM_BOT_SECRET": effective_secret,
+            "WECOM_WS_URL": ws_url,
+            "WECOM_ALLOWED_PUBLICATIONS": allowed_pubs,
+            "WECOM_AUTO_EXECUTE_CAPABILITIES": auto_exec,
+            "COMPANY_AGENT_WECOM_WORKSPACE": workspace_id,
+            "COMPANY_AGENT_WECOM_ISOLATE_WORKSPACES": "true" if isolate_ws else "false",
+            "WECOM_GROUP_DIRECT_ON_CALLBACK": "true" if group_direct else "false",
+        }
+        if "COMPANY_AGENT_WECOM_BOT_ID" in existing:
+            updates_wc["COMPANY_AGENT_WECOM_BOT_ID"] = bot_id
+        if "COMPANY_AGENT_WECOM_BOT_SECRET" in existing:
+            updates_wc["COMPANY_AGENT_WECOM_BOT_SECRET"] = effective_secret
+
+        update_runtime_env_file(config_path, updates_wc)
+        WeComBotSettings.load(config_path)
+        plane.record_external_audit("channel_config_updated", {
+            "channel": "wecom",
+            "bot_id": bot_id,
+            "secret_changed": bool(raw_secret),
+            "ws_url": ws_url,
+            "allowed_publications": allowed_pubs,
+            "auto_execute_capabilities": auto_exec,
+            "workspace_id": workspace_id,
+            "isolate_workspaces": isolate_ws,
+            "group_direct_on_callback": group_direct,
+        })
+        return _runtime_config_payload(plane, config_path)
+
+    raise ValueError("channel must be 'qq' or 'wecom'")
+
+
+def _test_channel_connection(config_path: Path, body: Mapping[str, Any]) -> dict[str, Any]:
+    import socket
+    import ssl
+
+    existing = _load_env_safe(config_path)
+    channel = str(body.get("channel") or "").strip().lower()
+    if channel == "qq":
+        app_id = str(body.get("app_id") or existing.get("QQBOT_APP_ID") or existing.get("QQBOT_APPID") or "").strip()
+        secret = str(body.get("client_secret") or "").strip() or (existing.get("QQBOT_CLIENT_SECRET") or existing.get("QQBOT_SECRET") or "").strip()
+        api_base_url = str(body.get("api_base_url") or existing.get("QQBOT_API_BASE_URL") or "https://api.bot.qq.com").strip().rstrip("/")
+        if not app_id or not secret:
+            raise ValueError("测试 QQ 机器人需要提供 AppID 和 ClientSecret")
+        if any(ch in app_id + secret for ch in "\r\n\x00"):
+            raise ValueError("QQ bot credentials must be single-line values")
+        parsed = urlsplit(api_base_url)
+        if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("QQBOT_API_BASE_URL must be an HTTPS base URL without credentials or query")
+        settings = QQBotSettings(app_id=app_id, client_secret=secret, api_base_url=api_base_url)
+        try:
+            token = QQBotAPI(settings, timeout=8.0).access_token()
+        except Exception as err:
+            raise ValueError(f"QQ 机器人凭据校验失败：{err}") from err
+        return {
+            "ok": True,
+            "channel": "qq",
+            "app_id": app_id,
+            "token_obtained": bool(token),
+            "message": f"QQ 机器人 (AppID: {app_id}) 凭据校验通过，已成功换取 Access Token。",
+        }
+
+    if channel == "wecom":
+        bot_id = str(body.get("bot_id") or existing.get("WECOM_BOT_ID") or existing.get("COMPANY_AGENT_WECOM_BOT_ID") or "").strip()
+        secret = str(body.get("bot_secret") or "").strip() or (existing.get("WECOM_BOT_SECRET") or existing.get("COMPANY_AGENT_WECOM_BOT_SECRET") or "").strip()
+        ws_url = str(body.get("ws_url") or existing.get("WECOM_WS_URL") or WECOM_DEFAULT_WS_URL).strip()
+        if not bot_id or not secret:
+            raise ValueError("测试企业微信机器人需要提供 BotID 和 Secret")
+        if any(ch in bot_id + secret for ch in "\r\n\x00"):
+            raise ValueError("WeCom bot credentials must be single-line values")
+        parsed = urlsplit(ws_url)
+        if parsed.scheme != "wss" or not parsed.netloc or parsed.username is not None or parsed.password is not None or parsed.fragment:
+            raise ValueError("WECOM_WS_URL must be a wss:// URL without embedded credentials or fragment")
+        host = parsed.hostname or ""
+        port = parsed.port or 443
+        try:
+            ctx = ssl.create_default_context()
+            with socket.create_connection((host, port), timeout=6.0) as tcp_sock:
+                with ctx.wrap_socket(tcp_sock, server_hostname=host):
+                    pass
+        except Exception as err:
+            raise ValueError(f"企业微信网关 {host}:{port} TLS 连通失败：{type(err).__name__}") from err
+        return {
+            "ok": True,
+            "channel": "wecom",
+            "bot_id": bot_id,
+            "ws_url": ws_url,
+            "message": f"企业微信网关 ({host}:{port}) TLS 连通性及凭据格式校验通过（为防踢掉在线长连接，未在探测中重复发送 subscribe 帧）。",
+        }
+
+    raise ValueError("channel must be 'qq' or 'wecom'")

@@ -56,10 +56,33 @@ class DssuperAgentDecision:
     reason: Any
     occurred_at: str
     strength: str
-    assistant_intent: dict[str, Any]
+    assistant_intent: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def unavailable_reason_summary(self) -> tuple[str, str]:
+        codes: list[str] = []
+        if isinstance(self.reason, list):
+            for item in self.reason:
+                if isinstance(item, dict):
+                    code = str(item.get("code") or "").strip()
+                    vals = item.get("values")
+                    text = str(vals.get("text") or "").strip() if isinstance(vals, dict) else ""
+                    if code:
+                        codes.append(f"{code}:{text}" if text else code)
+                elif isinstance(item, str) and item.strip():
+                    codes.append(item.strip())
+        elif isinstance(self.reason, dict):
+            code = str(self.reason.get("code") or "").strip()
+            if code:
+                codes.append(code)
+        elif isinstance(self.reason, str) and self.reason.strip():
+            codes.append(self.reason.strip())
+        summary = ", ".join(codes)[:200] or "unavailable"
+        if any(c == "timeout" or c.startswith("timeout:") for c in codes):
+            return "eval_timeout", f"DSSuperAgent assessment timed out ({summary})"
+        return "upstream_unavailable", f"DSSuperAgent assessment unavailable ({summary})"
 
 
 @dataclass(frozen=True)
@@ -270,14 +293,18 @@ class DssuperAgentAdapter:
         if value["outcome"] not in {"ignore", "wouldAccept", "accept", "unavailable", "stop", "reopen"}:
             raise DssuperAgentProtocolError("DSSuperAgent decision has an unsupported outcome")
         intent = value.get("assistantIntent")
-        if not isinstance(intent, dict):
-            raise DssuperAgentProtocolError("DSSuperAgent decision has no structured assistant intent")
-        cls._validate_intent(intent)
+        if value["outcome"] == "unavailable" and intent is None:
+            parsed_intent: dict[str, Any] | None = None
+        else:
+            if not isinstance(intent, dict):
+                raise DssuperAgentProtocolError("DSSuperAgent decision has no structured assistant intent")
+            cls._validate_intent(intent)
+            parsed_intent = intent
         reason = value.get("reason")
         if not isinstance(reason, (str, dict, list)):
             raise DssuperAgentProtocolError("DSSuperAgent decision has an invalid reason")
         return DssuperAgentDecision(value["id"], trigger_ids, thread_key, value["kind"], value["outcome"], reason,
-                                    value["at"], value["strength"], intent)
+                                    value["at"], value["strength"], parsed_intent)
 
     @staticmethod
     def _validate_intent(intent: dict[str, Any]) -> None:

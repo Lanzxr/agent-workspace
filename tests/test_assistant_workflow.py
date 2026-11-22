@@ -535,6 +535,28 @@ class AssistantWorkflowTests(unittest.TestCase):
         self.assertTrue(dispatched_params[1]["require_user_reply"])
         self.assertEqual(dispatched_params[1]["resume_session_id"], "worker-sess-1")
 
+    def test_unavailable_timeout_decision_marks_run_failed_with_eval_timeout_category(self) -> None:
+        decision = DssuperAgentDecision(
+            decision_id="dec-timeout-1",
+            trigger_ids=["company-agent:ev-to-1"],
+            thread_key="company-agent:conv-to-1",
+            kind="unavailable",
+            outcome="unavailable",
+            reason=[{"code": "timeout"}],
+            occurred_at="2026-11-22T13:12:59Z",
+            strength="inferred",
+            assistant_intent=None,
+        )
+        upstream = FakeDssuperAgent(decision=decision)
+        wf = DssuperAgentWorkflow(self.plane, upstream)
+        ev = Event("ev-to-1", "qq.c2c", "u1", "conv-to-1", "u1", "2026-11-22T13:06:51Z", "查数据", [], ["dsh.task"])
+        with self.assertRaises(Exception):
+            wf.process_event(ev)
+        saved = self.plane.get_assistant_run("ev-to-1")
+        self.assertEqual(saved.status, "failed")
+        self.assertEqual(saved.error_category, "eval_timeout")
+        self.assertEqual(saved.decision_id, "dec-timeout-1")
+
 
 class RecordingDispatcherForTest:
     knowledge_service = None

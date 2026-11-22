@@ -663,6 +663,90 @@ class AdminApiTests(unittest.TestCase):
             finally:
                 plane.close()
 
+    def test_admin_console_runtime_model_and_channel_config_endpoints_mask_secrets(self):
+        def _req(url: str, *, method: str = "GET", headers: dict[str, str] | None = None, body: dict | None = None):
+            data = json.dumps(body).encode("utf-8") if body is not None else None
+            r = Request(url, data=data, method=method, headers=headers or {})
+            with urlopen(r) as resp:
+                return resp.status, json.loads(resp.read().decode("utf-8"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env_file = root / "runtime.env"
+            env_file.write_text(
+                "AGENT_MODEL_URL=https://models.example/v1\n"
+                "AGENT_MODEL_NAME=deepseek-v4.1-flash\n"
+                "AGENT_MODEL_API_KEY=sk-initial-secret-1234\n"
+                "QQBOT_APP_ID=1900001\n"
+                "QQBOT_CLIENT_SECRET=qq-secret-5678\n",
+                encoding="utf-8",
+            )
+            plane = ControlPlane.open(root / "control.sqlite")
+            server = HTTPServer(
+                ("127.0.0.1", 0),
+                make_handler(plane, root, "a" * 24, config_path=env_file),
+            )
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            headers = {"Authorization": "Bearer " + ("a" * 24), "Content-Type": "application/json"}
+            try:
+                status, data = _req(base + "/api/settings/runtime-config", headers=headers)
+                self.assertEqual(status, 200)
+                self.assertEqual(data["model"]["name"], "deepseek-v4.1-flash")
+                self.assertTrue(data["model"]["api_key_configured"])
+                self.assertEqual(data["model"]["api_key_masked"], "••••1234")
+                self.assertNotIn("sk-initial-secret-1234", json.dumps(data))
+
+                # Update model with blank api_key -> preserves existing key; sets fallback model
+                status, updated = _req(
+                    base + "/api/settings/model-config",
+                    method="PUT",
+                    headers=headers,
+                    body={
+                        "url": "https://models.example/v1",
+                        "name": "glm-5.3",
+                        "api_key": "",
+                        "context_window": 1048576,
+                        "max_tokens": 393216,
+                        "reasoning_effort": "low",
+                        "fallback_name": "deepseek-v4-pro",
+                    },
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(updated["model"]["name"], "glm-5.3")
+                self.assertEqual(updated["model"]["fallback_name"], "deepseek-v4-pro")
+                self.assertEqual(updated["model"]["reasoning_effort"], "low")
+                self.assertEqual(updated["model"]["api_key_masked"], "••••1234")
+
+                # Update WeCom channel config
+                status, wc_updated = _req(
+                    base + "/api/settings/channel-config",
+                    method="PUT",
+                    headers=headers,
+                    body={
+                        "channel": "wecom",
+                        "bot_id": "aib-bot-01",
+                        "bot_secret": "wecom-secret-9012",
+                        "ws_url": "wss://openws.work.weixin.qq.com",
+                        "allowed_publications": "group_update",
+                        "auto_execute_capabilities": "dsh.task",
+                        "workspace_id": "wecom-default",
+                        "isolate_workspaces": True,
+                        "group_direct_on_callback": True,
+                    },
+                )
+                self.assertEqual(status, 200)
+                self.assertTrue(wc_updated["channels"]["wecom"]["configured"])
+                self.assertEqual(wc_updated["channels"]["wecom"]["bot_id"], "aib-bot-01")
+                self.assertEqual(wc_updated["channels"]["wecom"]["bot_secret_masked"], "••••9012")
+                self.assertNotIn("wecom-secret-9012", json.dumps(wc_updated))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                plane.close()
+
 
 if __name__ == "__main__":
     unittest.main()

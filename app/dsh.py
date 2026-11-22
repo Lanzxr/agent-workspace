@@ -245,6 +245,20 @@ class DshAdapter:
         if self.runtime_directory.is_relative_to(manager.base_directory):
             raise ValueError("DSH configuration and receipts must be outside Agent workspaces")
 
+    def _refresh_config(self) -> RuntimeConfig:
+        """Reload RuntimeConfig from source_path when valid on disk so console model edits take effect immediately."""
+        src = self.config.source_path
+        if src is None or not src.is_file():
+            return self.config
+        try:
+            reloaded = RuntimeConfig.load(src)
+        except (OSError, ValueError):
+            return self.config
+        if self.config.dsh_command and not reloaded.dsh_command:
+            reloaded = replace(reloaded, dsh_command=self.config.dsh_command)
+        self.config = reloaded
+        return self.config
+
     def all_mcp_secrets(self) -> dict[str, str]:
         merged = dict(self.config.mcp_secrets)
         if self.mcp_secrets_provider is not None:
@@ -285,6 +299,7 @@ class DshAdapter:
         return None
 
     def preflight(self, request: ExecutionRequest, workspace: Workspace) -> DshTask:
+        self._refresh_config()
         task = DshTask.from_request(
             request,
             max_timeout_seconds=self.config.dsh_max_timeout_seconds,
@@ -335,13 +350,15 @@ class DshAdapter:
         web_enabled: bool | None,
         workspace_tier: str = "client_group",
         include_mcp: bool = True,
+        config_override: RuntimeConfig | None = None,
     ) -> list[dict[str, Any]]:
-        enabled = self.config.web_search_enabled if web_enabled is None else web_enabled
+        active_cfg = config_override or self.config
+        enabled = active_cfg.web_search_enabled if web_enabled is None else web_enabled
         provider_patch = [
-            dict(entry) for entry in self.config.provider_patch(web_enabled=enabled)
+            dict(entry) for entry in active_cfg.provider_patch(web_enabled=enabled)
         ]
         plugin_path = Path(__file__).resolve().parent / "dsh_plugins" / "searxng-search.mjs"
-        if enabled and self.config.web_gate_search_url and self.config.web_gate_api_key and plugin_path.is_file():
+        if enabled and active_cfg.web_gate_search_url and active_cfg.web_gate_api_key and plugin_path.is_file():
             provider_patch = [entry for entry in provider_patch if entry.get("id") != "tool-web"]
             provider_patch.extend([
                 {"insert": [{"id": "company-agent-searxng", "name": str(plugin_path)}]},
@@ -420,6 +437,7 @@ class DshAdapter:
             "Write each expected artifact under artifacts/, using exactly the relative names listed, "
             "creating parent directories and checking non-empty output in a single bash call without redundant read-back turns. "
             f"When generating user-deliverable files (e.g. .xlsx, .pdf, .docx, .csv, charts), save them inside {output_dir}/ (never use legacy work/out/). "
+            "Do not dump large raw datasets, full tables, or long JSON payloads in thinking or chat text; aggregate data via scripts inside the workspace and write only concise summaries and key metrics into the artifact. "
             "Even if blocked by a missing file or tool error, you MUST still write a clear Chinese blocker explanation into the expected artifact file via bash before exiting (never finish with only raw text or <thinking>). "
             "Keep host files, runtime configuration, logs/ and state/ unchanged. "
             "Do not publish messages, access production systems or widen permissions. "
@@ -469,6 +487,7 @@ class DshAdapter:
                 workspace_tier: str | None = None) -> ExecutionResult:
         if request.status != "running":
             raise ValueError("DSH requires a running, control-plane-approved Execution Request")
+        self._refresh_config()
         started_epoch = time.time()
         started_at = datetime.now(timezone.utc).isoformat()
         tier = workspace_tier or getattr(workspace, "tier", "client_group") or "client_group"
@@ -567,7 +586,60 @@ class DshAdapter:
                 )
                 session_monitor.probe()
                 phase1_steps, phase1_tools = live_trace.progress_counts()
+        fallback_model_info: dict[str, Any] | None = None
+        if self.config.has_fallback_model and process.error_category is None and phase1_tools == 0 and not live_trace.tools:
+            probe_events, _, probe_tools, _, probe_err = self._read_protocol(process.stdout, workspace.root)
+            if not probe_tools and probe_err in {"upstream_error", "empty_response"}:
+                remaining_for_fb = hard_deadline - time.monotonic()
+                if remaining_for_fb >= 1.0:
+                    primary_err_detail = self._extract_dsh_error_detail(probe_events, process.stderr)
+                    fb_cfg = self.config.with_fallback_as_primary()
+                    fb_patch_path = runtime_home / "provider.fallback.patch.yml"
+                    write_private_json(
+                        fb_patch_path,
+                        self._build_provider_patch(
+                            runner_path, web_enabled=web_enabled, workspace_tier=tier, config_override=fb_cfg,
+                        ),
+                    )
+                    fb_env = fb_cfg.environment(home=home, dsh_home=runtime_home, temporary_directory=temporary_directory)
+                    self._apply_runtime_environment(
+                        fb_env, web_enabled=web_enabled, workspace_tier=tier, authorized_mcp_servers=authorized_mcp,
+                    )
+                    session_resumed = False
+                    live_trace = _LiveDshTrace(self.manager, workspace.workspace_id, trace_name,
+                                               workspace.root, self._redact)
+                    session_monitor = DshSessionMonitor(
+                        runtime_home,
+                        live_trace,
+                        compaction_timeout_seconds=effective_compaction_timeout,
+                        node_executable=resolve_node_executable(command),
+                    )
+                    fb_soft_timeout = (remaining_for_fb - wrapup_reserve) if (
+                        wrapup_reserve > 0 and remaining_for_fb > wrapup_reserve
+                    ) else None
+                    process = run_process(
+                        (*command, "--profile", "headless", "--patch", str(fb_patch_path), "--json",
+                         "--permission-mode", "workspace-write", "--approval-policy", "never", "-"),
+                        cwd=workspace.root, env=fb_env, input_data=json.dumps(payload).encode("utf-8"),
+                        timeout_seconds=remaining_for_fb, max_output_bytes=task.max_output_bytes, lease_fd=lease_fd,
+                        idle_timeout_seconds=min(task.idle_timeout_seconds, remaining_for_fb),
+                        soft_timeout_seconds=fb_soft_timeout,
+                        graceful_terminate_seconds=graceful_seconds,
+                        on_stdout_line=live_trace.on_line,
+                        idle_state_probe=session_monitor.probe,
+                    )
+                    session_monitor.probe()
+                    phase1_steps, phase1_tools = live_trace.progress_counts()
+                    environment = fb_env
+                    fallback_model_info = {
+                        "primary_model": self.config.model_name,
+                        "fallback_model": fb_cfg.model_name,
+                        "fallback_url": fb_cfg.model_url,
+                        "primary_error_category": probe_err,
+                        **({"primary_error": primary_err_detail} if primary_err_detail else {}),
+                    }
         soft_wrapup_info: dict[str, Any] | None = None
+        dsh_error_detail: dict[str, str] | None = None
         active_process = process
         remaining = hard_deadline - time.monotonic()
         min_wrapup_budget = 0.5 if task.soft_wrapup_explicit else 5.0
@@ -649,6 +721,7 @@ class DshAdapter:
                 )
         else:
             phase1_events, session_id, tools, output, protocol_error = self._read_protocol(process.stdout, workspace.root)
+            dsh_error_detail = self._extract_dsh_error_detail(phase1_events, process.stderr)
             session_id = session_id or live_trace.session_id
             tools = tools | live_trace.tools
             raw_final_text = ""
@@ -666,7 +739,86 @@ class DshAdapter:
                     category = "timeout"
                 if category is None and process.returncode != 0:
                     category = "process_exit"
-            if category is None:
+            if category == "max_tokens":
+                val_cat, val_manifest, val_deliverables, val_diag = self._validate_outputs(
+                    workspace, request, task, started_epoch=started_epoch,
+                )
+                if val_cat is None:
+                    category = None
+                    manifest = val_manifest
+                    deliverable_files = val_deliverables
+                else:
+                    remaining = hard_deadline - time.monotonic()
+                    can_max_tokens_wrapup = (
+                        session_id is not None
+                        and task.soft_wrapup_seconds > 0
+                        and remaining > min_wrapup_budget
+                    )
+                    if can_max_tokens_wrapup and session_id is not None:
+                        mt_budget = min(
+                            remaining,
+                            task.soft_wrapup_seconds if task.soft_wrapup_explicit else max(task.soft_wrapup_seconds, 120.0),
+                        )
+                        artifacts_text = ", ".join(f"artifacts/{name}" for name in task.expected_artifacts) or "目标产物文件"
+                        mt_lines = [
+                            "[输出超限自动收尾] 上一轮响应因单次输出达到 token 上限被截断。请严格按最小步骤完成收尾：",
+                            "1) 严禁重复运行已完成的查询或长篇复述明细数据；",
+                            f"2) 立即用一次 bash 调用将目前已得出的核心汇总结论直接写入 {artifacts_text}（确保文件存在且非空）；",
+                            "3) 写入完成后立即结束并回复简短一句话。",
+                        ]
+                        if task.require_user_reply:
+                            begin, end = final_reply_markers(request.execution_id)
+                            fbegin, fend = deliverable_files_markers(request.execution_id)
+                            mt_lines.append(
+                                f"注意：最终产物仍必须严格包含一对起止标记 {begin} 与 {end}，标记内放给用户的中文总结（不超过1500字）；"
+                                f"若已生成交付文件，请在同一报告中写入 {fbegin} 与 {fend}。"
+                            )
+                        phase2, p2_session_id, p2_tools, p2_output, category = self._run_wrapup_phase(
+                            command=command,
+                            runtime_home=runtime_home,
+                            runner_path=runner_path,
+                            workspace=workspace,
+                            environment=environment,
+                            lease_fd=lease_fd,
+                            request=request,
+                            task=task,
+                            session_id=session_id,
+                            prompt_lines=mt_lines,
+                            wrapup_budget=mt_budget,
+                            phase1_process=process,
+                            effective_compaction_timeout=effective_compaction_timeout,
+                            live_trace=live_trace,
+                            session_monitor=session_monitor,
+                        )
+                        active_process = phase2
+                        session_id = p2_session_id or session_id
+                        tools = tools | p2_tools
+                        if p2_output:
+                            output = p2_output
+                        soft_wrapup_info = {
+                            "triggered": True,
+                            "reason": "max_tokens",
+                            "session_id": session_id,
+                            "succeeded": category is None,
+                        }
+                        if category is not None:
+                            soft_wrapup_info["phase2_error_category"] = category
+                        if category is None:
+                            category, manifest, deliverable_files, diag_mt = self._validate_outputs(
+                                workspace, request, task, started_epoch=started_epoch,
+                            )
+                            if diag_mt:
+                                output = f"{output}\n{diag_mt}" if output else diag_mt
+                        else:
+                            category, manifest, deliverable_files, output = self._recover_post_write_artifacts(
+                                workspace, request, task, category=category, output=output,
+                                phase1_steps=phase1_steps, phase1_tools=phase1_tools,
+                                live_trace=live_trace, soft_wrapup_info=soft_wrapup_info,
+                                started_epoch=started_epoch,
+                            )
+                    elif val_diag:
+                        output = f"{output}\n{val_diag}" if output else val_diag
+            elif category is None:
                 category, manifest, deliverable_files, diag = self._validate_outputs(
                     workspace, request, task, started_epoch=started_epoch,
                 )
@@ -745,6 +897,13 @@ class DshAdapter:
         if soft_wrapup_info is not None:
             soft_wrapup_info["succeeded"] = category is None
         output = strip_thinking_blocks(output)
+        redacted_dsh_error: dict[str, str] | None = None
+        if category is not None and dsh_error_detail:
+            redacted_dsh_error = {
+                k: self._redact(str(v))[:300]
+                for k, v in dsh_error_detail.items()
+                if v
+            }
         metadata = {
             "workspace_id": workspace.workspace_id, "cwd": ".", "session_id": session_id,
             "started_at": started_at, "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -764,15 +923,31 @@ class DshAdapter:
         }
         if soft_wrapup_info is not None:
             metadata["soft_wrapup"] = soft_wrapup_info
+        if fallback_model_info is not None:
+            metadata["fallback_model"] = fallback_model_info
+        if redacted_dsh_error:
+            metadata["dsh_error"] = redacted_dsh_error
         if task.resume_session_id:
             metadata["session_resumed"] = session_resumed
         status = "succeeded" if category is None else (
             "timed_out" if category in {"timeout", "idle_timeout", "compaction_timeout", "soft_timeout"} else "failed"
         )
+        error_msg: str | None = None
+        if category is not None:
+            detail_parts = [
+                part for part in (
+                    (redacted_dsh_error or {}).get("code"),
+                    (redacted_dsh_error or {}).get("message"),
+                ) if part
+            ]
+            if detail_parts:
+                error_msg = f"DSH execution failed: {category} ({': '.join(detail_parts)[:240]})"
+            else:
+                error_msg = f"DSH execution failed: {category}"
         return ExecutionResult(
             request.execution_id, status, self._redact(output),
             [f"logs/{trace_name}"],
-            [entry["path"] for entry in manifest], None if category is None else f"DSH execution failed: {category}", metadata,
+            [entry["path"] for entry in manifest], error_msg, metadata,
         )
 
     def _run_wrapup_phase(
@@ -1106,11 +1281,70 @@ class DshAdapter:
                 raise ValueError("incomplete execution")
             reason = final.get("reason")
             clean_text = strip_thinking_blocks(final["text"])
-            if not isinstance(reason, dict) or reason.get("kind") != "completed":
+            if not isinstance(reason, dict):
                 return events, session_id, tools, clean_text, "dsh_incomplete"
-            return events, session_id, tools, clean_text, None
+            rkind = str(reason.get("kind") or "")
+            if rkind == "completed":
+                return events, session_id, tools, clean_text, None
+            if rkind == "max-tokens":
+                return events, session_id, tools, clean_text, "max_tokens"
+            if rkind == "error":
+                err_obj = (
+                    reason.get("error")
+                    if isinstance(reason.get("error"), dict)
+                    else (reason.get("failure") if isinstance(reason.get("failure"), dict) else {})
+                )
+                code = str(err_obj.get("code") or "").upper()
+                msg = str(err_obj.get("message") or "").lower()
+                if "CONTEXT_WINDOW_EXCEEDED" in code or "context overflow" in msg or "context_length_exceeded" in msg:
+                    return events, session_id, tools, clean_text, "context_overflow"
+                if "EMPTY_RESPONSE" in code:
+                    return events, session_id, tools, clean_text, "empty_response"
+                return events, session_id, tools, clean_text, "upstream_error"
+            if rkind == "aborted":
+                return events, session_id, tools, clean_text, "aborted"
+            return events, session_id, tools, clean_text, "dsh_incomplete"
         except (ValueError, TypeError, KeyError, UnicodeError):
             return events, session_id, tools, "", "protocol_error"
+
+    @staticmethod
+    def _extract_dsh_error_detail(events: list[dict[str, Any]], stderr: bytes) -> dict[str, str] | None:
+        rkind = ""
+        code = ""
+        msg = ""
+        if events and isinstance(events[-1], dict) and events[-1].get("type") == "final":
+            reason = events[-1].get("reason")
+            if isinstance(reason, dict):
+                rkind = str(reason.get("kind") or "").strip()
+                err_obj = (
+                    reason.get("error")
+                    if isinstance(reason.get("error"), dict)
+                    else (reason.get("failure") if isinstance(reason.get("failure"), dict) else {})
+                )
+                code = str(err_obj.get("code") or "").strip()[:120]
+                msg = str(err_obj.get("message") or "").strip()[:400]
+        if not msg and stderr:
+            for raw_ln in stderr.decode("utf-8", errors="replace").splitlines():
+                ln = raw_ln.strip()
+                if ln.startswith("dsh: "):
+                    rest = ln[5:].strip()
+                    if ": " in rest and not code:
+                        c_part, m_part = rest.split(": ", 1)
+                        code = c_part.strip()[:120]
+                        msg = m_part.strip()[:400]
+                    else:
+                        msg = rest[:400]
+                    break
+        if not (rkind and rkind != "completed") and not code and not msg:
+            return None
+        out: dict[str, str] = {}
+        if rkind and rkind != "completed":
+            out["kind"] = rkind
+        if code:
+            out["code"] = code
+        if msg:
+            out["message"] = msg
+        return out
 
     @staticmethod
     def _artifact_path(workspace: Workspace, name: str) -> Path:

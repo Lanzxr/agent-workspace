@@ -142,6 +142,20 @@ class DssuperAgentAdapterTests(unittest.TestCase):
                 source_type="qq.group", conversation_id="grp-1", actor_id="u2", content="hello",
             )
 
+    def test_unavailable_decision_without_assistant_intent_is_parsed_cleanly(self) -> None:
+        self.thread_detail = {"decisions": [
+            {"id": "decision-unavail-1", "kind": "unavailable", "outcome": "unavailable",
+             "reason": [{"code": "timeout"}],
+             "at": "2026-11-22T13:12:59.267Z", "strength": "inferred",
+             "triggerIds": ["company-agent:event-1"], "thread": "company-agent:conversation-1"}
+        ]}
+        decision = self.adapter.wait_for_decision("company-agent:conversation-1", "company-agent:event-1", timeout=0.2)
+        self.assertEqual(decision.outcome, "unavailable")
+        self.assertIsNone(decision.assistant_intent)
+        cat, msg = decision.unavailable_reason_summary()
+        self.assertEqual(cat, "eval_timeout")
+        self.assertIn("timed out", msg)
+
 
 if __name__ == "__main__":
     unittest.main()

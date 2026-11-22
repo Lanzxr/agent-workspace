@@ -200,7 +200,8 @@ def main() -> int:
                         qq_app_id=qq_settings.app_id if qq_settings is not None else None,
                         wecom_bot_id=wecom_settings.bot_id if wecom_settings is not None else None,
                         mcp_runtime_servers=mcp_servers, mcp_secrets=mcp_secrets,
-                        tool_forge=admin_forge, forge_secrets_vault=admin_vault)
+                        tool_forge=admin_forge, forge_secrets_vault=admin_vault,
+                        config_path=arguments.config)
             return 0
         if arguments.command == "outbox":
             if arguments.outbox_command == "list":
@@ -587,12 +588,21 @@ def _run_outbox_retry(service: Any, stop: threading.Event,
                       prune_interval_seconds: float = 21600.0) -> None:
     import time as _time
     last_prune: float | None = None
+    last_reconcile: float | None = None
     while not stop.wait(interval_seconds):
         try:
             service.flush_outbox(respect_backoff=True)
         except Exception as error:
             print(f"company-agent: background QQ Outbox flush failed ({type(error).__name__})", file=sys.stderr)
         now = _time.monotonic()
+        if manager is not None and plane is not None and (
+            last_reconcile is None or (now - last_reconcile) >= 60.0
+        ):
+            last_reconcile = now
+            try:
+                plane.reconcile_abandoned_queued(manager, min_age_seconds=60.0)
+            except Exception as error:
+                print(f"company-agent: execution reconcile failed ({type(error).__name__})", file=sys.stderr)
         if manager is not None and plane is not None and (
             last_prune is None or (now - last_prune) >= prune_interval_seconds
         ):

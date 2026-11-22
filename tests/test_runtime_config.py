@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.runtime_config import RuntimeConfig
+from app.runtime_config import RuntimeConfig, mask_secret, update_runtime_env_file
 
 
 class RuntimeConfigTests(unittest.TestCase):
@@ -84,6 +84,48 @@ class RuntimeConfigTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "AGENT_DSH_TIMEOUT_SECONDS"):
                 RuntimeConfig.load(config_file)
+
+    def test_fallback_model_reasoning_effort_and_atomic_env_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config_file = Path(temporary_directory) / "runtime.env"
+            config_file.write_text(
+                "# header comment\n"
+                "AGENT_MODEL_URL=https://models.example/v1\n"
+                "AGENT_MODEL_API_KEY=primary-secret-key\n"
+                "AGENT_MODEL_NAME=primary-model\n",
+                encoding="utf-8",
+            )
+            update_runtime_env_file(config_file, {
+                "AGENT_MODEL_CONTEXT_WINDOW": "524288",
+                "AGENT_MODEL_MAX_TOKENS": "131072",
+                "AGENT_MODEL_REASONING_EFFORT": "medium",
+                "AGENT_MODEL_FALLBACK_NAME": "backup-model",
+                "AGENT_MODEL_FALLBACK_API_KEY": "backup-secret-9999",
+            })
+            self.assertIn("# header comment", config_file.read_text(encoding="utf-8"))
+            self.assertEqual(mask_secret("backup-secret-9999"), "••••9999")
+
+            cfg = RuntimeConfig.load(config_file)
+            self.assertTrue(cfg.has_fallback_model)
+            self.assertEqual(cfg.model_context_window, 524288)
+            self.assertEqual(cfg.model_max_tokens, 131072)
+            self.assertEqual(cfg.model_reasoning_effort, "medium")
+            self.assertEqual(cfg.fallback_model_name, "backup-model")
+            self.assertEqual(cfg.fallback_model_url, "https://models.example/v1")
+            self.assertEqual(cfg.redact("leak backup-secret-9999 and primary-secret-key"), "leak [REDACTED] and [REDACTED]")
+
+            patch_entries = cfg.provider_patch()
+            self.assertEqual(patch_entries[0]["config"]["reasoningEffort"], "medium")
+            provider_cfg = patch_entries[1]["config"]["providers"]["company-agent"]
+            self.assertTrue(provider_cfg["compat"]["supportsReasoningEffort"])
+            self.assertEqual(provider_cfg["models"][0]["contextWindow"], 524288)
+            self.assertEqual(provider_cfg["models"][0]["maxTokens"], 131072)
+            self.assertIn("reasoningEfforts", provider_cfg["models"][0])
+
+            fb_cfg = cfg.with_fallback_as_primary()
+            self.assertEqual(fb_cfg.model_name, "backup-model")
+            self.assertEqual(fb_cfg.api_key, "backup-secret-9999")
+            self.assertFalse(fb_cfg.has_fallback_model)
 
 
 if __name__ == "__main__":

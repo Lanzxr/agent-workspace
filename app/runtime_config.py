@@ -5,13 +5,92 @@ import math
 import os
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
 from .mcp_registry import McpServerSpec, load_mcp_secrets, parse_mcp_servers_json
 from .ports import DEFAULT_FORGE_MCP_PORT, resolve_port_settings
+
+
+VALID_REASONING_EFFORTS = frozenset({"off", "low", "medium", "high"})
+
+
+def mask_secret(value: str) -> str:
+    """Return a non-reversible masked preview of a secret for UI display."""
+    clean = (value or "").strip()
+    if not clean:
+        return ""
+    if len(clean) >= 8:
+        return f"••••{clean[-4:]}"
+    return "••••"
+
+
+def format_env_value(value: str) -> str:
+    if any(ch in value for ch in "\r\n\x00"):
+        raise ValueError("runtime configuration values must be single-line strings")
+    if not value:
+        return ""
+    if any(ch.isspace() for ch in value) or any(ch in value for ch in ('#', '"', "'")):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return value
+
+
+def update_runtime_env_file(path: Path, updates: Mapping[str, str | None]) -> dict[str, str]:
+    """Atomically update selected keys in a 0600 runtime.env file while preserving comments and order."""
+    for key, val in updates.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError(f"invalid runtime configuration key: {key}")
+        if val is not None and any(ch in str(val) for ch in "\r\n\x00"):
+            raise ValueError(f"{key} must be a single-line value")
+
+    resolved = path.expanduser().resolve()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    raw_lines = resolved.read_text(encoding="utf-8-sig").splitlines() if resolved.is_file() else []
+
+    remaining = dict(updates)
+    out_lines: list[str] = []
+    for raw_line in raw_lines:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            out_lines.append(raw_line)
+            continue
+        candidate = stripped[7:].lstrip() if stripped.startswith("export ") else stripped
+        if "=" not in candidate:
+            out_lines.append(raw_line)
+            continue
+        name = candidate.split("=", 1)[0].strip()
+        if name not in remaining:
+            out_lines.append(raw_line)
+            continue
+        new_val = remaining.pop(name)
+        if new_val is None:
+            continue
+        prefix = "export " if stripped.startswith("export ") else ""
+        out_lines.append(f"{prefix}{name}={format_env_value(str(new_val))}")
+
+    for name, new_val in remaining.items():
+        if new_val is None:
+            continue
+        out_lines.append(f"{name}={format_env_value(str(new_val))}")
+
+    content = "\n".join(out_lines) + ("\n" if out_lines else "")
+    tmp_path = resolved.parent / f".{resolved.name}.{os.getpid()}.tmp"
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, resolved)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    return RuntimeConfig._parse_env(resolved)
 
 
 def parse_forge_mcp_settings(values: Mapping[str, str]) -> tuple[bool, str, int, str]:
@@ -204,6 +283,57 @@ class RuntimeConfig:
     forge_mcp_host: str = "127.0.0.1"
     forge_mcp_port: int = DEFAULT_FORGE_MCP_PORT
     forge_mcp_owner: str = "admin"
+    model_context_window: int = DEFAULT_MODEL_CONTEXT_WINDOW
+    model_max_tokens: int = DEFAULT_MODEL_MAX_TOKENS
+    model_reasoning_effort: str | None = None
+    fallback_model_name: str | None = None
+    fallback_model_url: str | None = None
+    fallback_api_key: str = field(default="", repr=False)
+
+    @property
+    def has_fallback_model(self) -> bool:
+        if not self.fallback_model_name:
+            return False
+        fb_url = self.fallback_model_url or self.model_url
+        return self.fallback_model_name != self.model_name or fb_url != self.model_url
+
+    def with_fallback_as_primary(self) -> "RuntimeConfig":
+        if not self.fallback_model_name:
+            raise ValueError("fallback model is not configured")
+        return replace(
+            self,
+            model_name=self.fallback_model_name,
+            model_url=self.fallback_model_url or self.model_url,
+            api_key=self.fallback_api_key or self.api_key,
+            fallback_model_name=None,
+            fallback_model_url=None,
+            fallback_api_key="",
+        )
+
+    @staticmethod
+    def _validate_model_url(raw_url: str, *, label: str = "model URL") -> str:
+        url = raw_url.strip().rstrip("/")
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+            raise ValueError(f"{label} must be an HTTP(S) base URL without embedded credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError(f"{label} must not contain a query or fragment")
+        if url.endswith("/chat/completions"):
+            url = url.removesuffix("/chat/completions")
+        return url
+
+    @staticmethod
+    def _parse_int_limit(values: dict[str, str], key: str, default: int, *, minimum: int, maximum: int) -> int:
+        raw = (values.get(key) or "").strip()
+        if not raw:
+            return int(default)
+        try:
+            parsed = int(raw)
+        except ValueError as error:
+            raise ValueError(f"{key} must be an integer") from error
+        if not minimum <= parsed <= maximum:
+            raise ValueError(f"{key} must be between {minimum} and {maximum}")
+        return parsed
 
     @staticmethod
     def _parse_web_gate_search_url(values: dict[str, str]) -> str | None:
@@ -227,20 +357,40 @@ class RuntimeConfig:
         if not path.is_file():
             raise ValueError(f"runtime configuration not found: {path}")
         values = cls._parse_env(path)
-        url = (values.get("AGENT_MODEL_URL") or values.get("DEEPSEEK_BASE_URL") or "").strip().rstrip("/")
+        url_raw = (values.get("AGENT_MODEL_URL") or values.get("DEEPSEEK_BASE_URL") or "").strip()
         key = (values.get("AGENT_MODEL_API_KEY") or values.get("DEEPSEEK_API_KEY") or "").strip()
         model = (values.get("AGENT_MODEL_NAME") or "").strip()
-        if not url or not key or not model:
+        if not url_raw or not key or not model:
             raise ValueError("AGENT_MODEL_URL, AGENT_MODEL_API_KEY and AGENT_MODEL_NAME are required")
-        parsed = urlsplit(url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
-            raise ValueError("model URL must be an HTTP(S) base URL without embedded credentials")
-        if parsed.query or parsed.fragment:
-            raise ValueError("model URL must not contain a query or fragment")
-        if url.endswith("/chat/completions"):
-            url = url.removesuffix("/chat/completions")
+        url = cls._validate_model_url(url_raw, label="model URL")
         if any(character in key + model for character in "\r\n\x00"):
             raise ValueError("model name and API key must be single-line values")
+        context_window = cls._parse_int_limit(
+            values, "AGENT_MODEL_CONTEXT_WINDOW", DEFAULT_MODEL_CONTEXT_WINDOW,
+            minimum=4096, maximum=4_194_304,
+        )
+        max_tokens = cls._parse_int_limit(
+            values, "AGENT_MODEL_MAX_TOKENS", min(DEFAULT_MODEL_MAX_TOKENS, context_window),
+            minimum=512, maximum=min(2_097_152, context_window),
+        )
+        reasoning_raw = (values.get("AGENT_MODEL_REASONING_EFFORT") or "").strip().lower()
+        reasoning_effort: str | None = None
+        if reasoning_raw:
+            if reasoning_raw not in VALID_REASONING_EFFORTS:
+                raise ValueError("AGENT_MODEL_REASONING_EFFORT must be one of: off, low, medium, high")
+            reasoning_effort = reasoning_raw
+        fallback_name = (values.get("AGENT_MODEL_FALLBACK_NAME") or "").strip() or None
+        fallback_url_raw = (values.get("AGENT_MODEL_FALLBACK_URL") or "").strip()
+        fallback_key = (values.get("AGENT_MODEL_FALLBACK_API_KEY") or "").strip()
+        if any(character in (fallback_name or "") + fallback_key for character in "\r\n\x00"):
+            raise ValueError("fallback model name and API key must be single-line values")
+        fallback_url: str | None = None
+        if fallback_url_raw:
+            fallback_url = cls._validate_model_url(fallback_url_raw, label="fallback model URL")
+        elif fallback_name:
+            fallback_url = url
+        if fallback_name and not fallback_key:
+            fallback_key = key
         command: tuple[str, ...] = ()
         if values.get("AGENT_DSH_COMMAND"):
             try:
@@ -282,6 +432,12 @@ class RuntimeConfig:
             forge_mcp_host=forge_host,
             forge_mcp_port=forge_port,
             forge_mcp_owner=forge_owner,
+            model_context_window=context_window,
+            model_max_tokens=max_tokens,
+            model_reasoning_effort=reasoning_effort,
+            fallback_model_name=fallback_name,
+            fallback_model_url=fallback_url,
+            fallback_api_key=fallback_key,
         )
 
     @staticmethod
@@ -344,18 +500,30 @@ class RuntimeConfig:
 
     def provider_patch(self, *, web_enabled: bool | None = None) -> list[dict[str, object]]:
         enabled = self.web_search_enabled if web_enabled is None else web_enabled
+        default_model_cfg: dict[str, object] = {"provider": "company-agent", "model": self.model_name}
+        compat_cfg: dict[str, object] = {"supportsDeveloperRole": False, "maxTokensField": "max_tokens"}
+        model_entry: dict[str, object] = {
+            "id": self.model_name,
+            "contextWindow": int(self.model_context_window),
+            "maxTokens": int(self.model_max_tokens),
+        }
+        if self.model_reasoning_effort in VALID_REASONING_EFFORTS:
+            default_model_cfg["reasoningEffort"] = self.model_reasoning_effort
+            compat_cfg["supportsReasoningEffort"] = True
+            model_entry["reasoningEfforts"] = {
+                "off": "",
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+            }
         return [
-            {"id": "agent-default-model", "config": {"provider": "company-agent", "model": self.model_name}},
+            {"id": "agent-default-model", "config": default_model_cfg},
             {"id": "llm-pi-ai", "config": {"providers": {"company-agent": {
                 "apiKeyEnv": "COMPANY_AGENT_MODEL_API_KEY",
                 "api": "openai-completions",
                 "baseURL": self.model_url,
-                "compat": {"supportsDeveloperRole": False, "maxTokensField": "max_tokens"},
-                "models": [{
-                    "id": self.model_name,
-                    "contextWindow": DEFAULT_MODEL_CONTEXT_WINDOW,
-                    "maxTokens": DEFAULT_MODEL_MAX_TOKENS,
-                }],
+                "compat": compat_cfg,
+                "models": [model_entry],
             }}}},
             {"id": "llm-deepseek", "disabled": True},
             {"id": "tool-web", "disabled": not enabled},
@@ -396,7 +564,7 @@ class RuntimeConfig:
 
     def redact(self, text: str) -> str:
         secrets = sorted(
-            {s for s in (self.api_key, self.web_gate_api_key, *self.mcp_secrets.values()) if s},
+            {s for s in (self.api_key, self.fallback_api_key, self.web_gate_api_key, *self.mcp_secrets.values()) if s},
             key=len,
             reverse=True,
         )
