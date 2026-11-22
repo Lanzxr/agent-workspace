@@ -75,21 +75,49 @@ def _sync_superagent_patches(config_path: Path, data_dir: Path, dsh_home: Path, 
         patch_path,
         json.dumps(_build_superagent_patch(runtime_cfg, host, port), ensure_ascii=False, indent=2) + "\n",
     )
-    profile_patch = dsh_home / "profiles" / "superagent" / "cordis.patch.yml"
-    if profile_patch.parent.is_dir():
-        state_dir = str((dsh_home.parent / "superagent-state").resolve())
-        if profile_patch.is_file():
-            for line in profile_patch.read_text(encoding="utf-8", errors="replace").splitlines():
-                stripped = line.strip()
-                if stripped.startswith("stateDir:") or '"stateDir"' in stripped:
-                    raw_val = stripped.split(":", 1)[1].strip().strip(",").strip('"').strip("'")
-                    if raw_val:
-                        state_dir = raw_val
-                        break
-        _write_private_file(
-            profile_patch,
-            json.dumps(_build_superagent_patch(runtime_cfg, host, port, state_dir=state_dir), ensure_ascii=False, indent=2) + "\n",
+    profile_dir = dsh_home / "profiles" / "superagent"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    default_state_dir = (dsh_home.parent / "superagent-state").resolve()
+    default_state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    pkg_json = profile_dir / "package.json"
+    if not pkg_json.is_file():
+        pkg_json.write_text(
+            json.dumps({
+                "name": "dsh-profile-superagent",
+                "private": True,
+                "dependencies": {
+                    "dsh-superagent": f"link:{(release / 'dss').as_posix()}",
+                },
+                "dsh": {
+                    "profile": {
+                        "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-superagent"],
+                    },
+                },
+            }, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
         )
+    cordis_yml = profile_dir / "cordis.yml"
+    if not cordis_yml.is_file():
+        cordis_yml.write_text("[]\n", encoding="utf-8")
+    nm_dir = profile_dir / "node_modules"
+    nm_dir.mkdir(parents=True, exist_ok=True)
+    dss_link = nm_dir / "dsh-superagent"
+    if not dss_link.exists() and not dss_link.is_symlink():
+        dss_link.symlink_to(release / "dss", target_is_directory=True)
+    profile_patch = profile_dir / "cordis.patch.yml"
+    state_dir = str(default_state_dir)
+    if profile_patch.is_file():
+        for line in profile_patch.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("stateDir:") or '"stateDir"' in stripped:
+                raw_val = stripped.split(":", 1)[1].strip().strip(",").strip('"').strip("'")
+                if raw_val:
+                    state_dir = raw_val
+                    break
+    _write_private_file(
+        profile_patch,
+        json.dumps(_build_superagent_patch(runtime_cfg, host, port, state_dir=state_dir), ensure_ascii=False, indent=2) + "\n",
+    )
     return patch_path
 
 

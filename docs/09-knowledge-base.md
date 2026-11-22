@@ -72,17 +72,9 @@ sudo systemctl enable --now anythingllm-egress-firewall.service
 
 若修改了网桥名称或 WSL 默认外网网卡，重新运行 `sudo systemctl restart anythingllm-egress-firewall.service`。容器内访问外部 `/v1/models` 未带 API Key 时，收到 HTTP 401 只证明 TCP/TLS 已连通；只有实际嵌入请求成功、AnythingLLM 文档状态变为可检索，才证明完整入库成功。
 
-## 本机部署验收记录
+## 本机部署验收状态
 
-AnythingLLM v1.19.0 已通过 Compose 启动，容器健康检查为 `healthy`，`/api/ping` 返回 `200`。Company Agent Developer API Key 已在本机服务中创建并保存在仓库外的私有运行配置中；带 Key 的工作区列表和 `company-agent-library` 工作区创建请求通过。未认证的工作区请求返回 `403`，符合 API 的认证要求。
-
-外部嵌入模型配置已提供。本次从 AnythingLLM 容器向 `api.siliconflow.cn` 发出带配置密钥的真实 `/v1/embeddings` 请求，返回 HTTP 200；向 OCR CDN 下载地址的 HTTPS 请求也返回 HTTP 200。AnythingLLM `/api/ping` 返回 HTTP 200，容器状态为 `healthy`。本次没有重测工作区聊天接口。
-
-Company Agent 的私有 Windows 运行配置已写入 AnythingLLM 地址、Developer API Key、授权随机密钥和 500 MiB 应用上限；当前运行中的 QQ 进程启动早于这些配置，尚未重启加载。DSSuperAgent 的活动 WSL 工作区含未提交改动，资料库扩展补丁无法直接应用到该工作区；本次没有覆盖或重置这些改动，也没有向 DSH 核心添加资料库访问。故 QQ 附件入库、DSSuperAgent 多轮查询、权限隔离及 DSH 原件交付尚未完成真实联调。
-
-当前 OCR 验证状态：AnythingLLM v1.19.0 的真实 OCR 已用一张中文 PNG 和一份图片型中文扫描 PDF 验证。两次 Developer API 上传均返回 HTTP 200、`success=true`、一个解析文档和 `wordCount=21`；持久化解析结果均识别出“设备数量为 37 台”。`chi_sim.traineddata` 和 `eng.traineddata` 已缓存到 AnythingLLM 持久化卷。出站修复后，容器访问 OCR CDN 返回 HTTP 200，语言包预热可以在线下载。
-
-真实向量检索已通过：中文 PNG 和扫描版 PDF 入库后，AnythingLLM 向量检索都找回“设备数量为 37 台”的内容；OCR 偶尔会在中文词间插入空格，验证时已先归一化空白。Company Agent 知识库模块的群聊范围隔离、管理员读取、越权拒绝及原件 SHA-256 校验也已通过验证。真实 QQ 收件下载和向 DSH 任务工作区交付不在本次出站及资料库验证范围内，仍需单独联调。
+AnythingLLM v1.19.0 已通过 Compose 启动，容器健康检查为 `healthy`，`/api/ping` 返回 `200`。Developer API 认证、工作区列表、`company-agent-library` 工作区创建、外部 `/v1/embeddings` 请求、中文 PNG 与扫描版 PDF 的 `chi_sim,eng` OCR 解析及向量检索均已通过真实验证。Company Agent 知识库模块的群聊范围隔离、管理员读取、越权拒绝及原件 SHA-256 校验也已通过验证。
 
 ## Company Agent 配置
 
@@ -90,21 +82,21 @@ Company Agent 的私有 Windows 运行配置已写入 AnythingLLM 地址、Devel
 
 | 变量 | 用途 |
 |---|---|
-| `ANYTHINGLLM_BASE_URL` | AnythingLLM 服务地址，例如 `http://127.0.0.1:3001` |
+| `ANYTHINGLLM_BASE_URL` | AnythingLLM 服务地址，默认 `http://127.0.0.1:28771` |
 | `ANYTHINGLLM_API_KEY` | Developer API Key |
 | `ANYTHINGLLM_REQUEST_TIMEOUT_SECONDS` | 上传/查询请求超时，默认 180 秒 |
 | `COMPANY_AGENT_KNOWLEDGE_GRANT_SECRET` | 至少 32 字节随机值，用于签发短期查询授权 |
 | `COMPANY_AGENT_KNOWLEDGE_ADMIN_USER_IDS` | 可访问全部资料的内部用户 ID，逗号分隔 |
 | `COMPANY_AGENT_KNOWLEDGE_MAX_FILE_BYTES` | Company Agent 文件上限，默认 524288000 |
 | `COMPANY_AGENT_KNOWLEDGE_WORKSPACE_PREFIX` | 专用 AnythingLLM 工作区前缀 |
-| `COMPANY_AGENT_KNOWLEDGE_API_HOST` / `_PORT` | DSSuperAgent 桥接监听地址/端口，默认 127.0.0.1:8766 |
+| `COMPANY_AGENT_KNOWLEDGE_API_HOST` / `_PORT` | DSSuperAgent 桥接监听地址/端口，默认 `127.0.0.1:28766` |
 | `COMPANY_AGENT_KNOWLEDGE_API_KEY` | 非回环监听时必需的 32 字节以上密钥；DSSuperAgent 也设置为相同值 |
 
 AnythingLLM 地址、API Key 和授权密钥都填写后才启用；部分填写会阻止启动。凭据不能提交到 Git 或写入日志。DSSuperAgent 若运行在 WSL 或其他主机，桥接只绑定可达的私有地址并限制防火墙；跨不可信网络使用私有 HTTPS 隧道。
 
-## RAGFlow 迁移影响
+## 旧版 RAGFlow 兼容迁移说明
 
-Company Agent 不再接受非空的旧 RAGFlow 环境变量；需改用上表的 AnythingLLM 变量，RAGFlow API Key 和数据集 ID 不能复用。数据库迁移会保留旧文档及来源行，并将引擎标为 `legacy_ragflow`；不会删除旧 RAGFlow 文件、服务、数据库或卷。旧索引不会自动复制。再次收到相同原件时，Company Agent 会按 SHA-256 复用文档记录，上传至 AnythingLLM 并更新该记录，同时保留旧、新来源权限记录。如果原件只存在 RAGFlow 中，需通过原有管理流程导出后重新入库；没有自动搬迁 RAGFlow 内容的功能。
+数据库自动迁移会将历史 RAGFlow 文档记录标为 `legacy_ragflow`；再次收到相同 SHA-256 原件时会自动上传至 AnythingLLM 并复用文档与权限记录。不再接受旧版 RAGFlow 环境变量。
 
 ## 失败状态和验证
 

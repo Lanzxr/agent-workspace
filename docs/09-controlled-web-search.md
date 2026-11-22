@@ -6,15 +6,15 @@ DSSuperAgent 主会话没有联网工具；需要实时信息时由它派发 wor
 
 Company Agent 事件的当前消息是联网需求判断的依据。若当前消息要求最新、实时、外部或网页信息，DSSuperAgent 必须提出 `dsh.task`，不能因为主会话没有联网工具就直接返回“无法联网”。QQ 渠道若需要回复，发布建议使用 `group_update`；如果模型错误选择 `private_nudge`，Company Agent 在群聊发布已获允许时会记录降级原因并转为群内回复，防止结果被静默丢弃。
 
-SearXNG 只监听 `127.0.0.1:8888`，JSON 输出由 `deploy/search/settings.yml` 显式启用，镜像固定到已验证的 digest。它不运行模型或嵌入服务。SearXNG 使用固定 Docker 网桥 `br-agent-search`；`anythingllm-egress-firewall.service` 只允许 AnythingLLM 和 SearXNG 网桥向外建立 TCP 443 连接并允许已建立连接的回包，不开放容器入站端口。秘密 `SEARXNG_SECRET` 保存在 WSL 私有配置文件 `~/.config/company-agent/search.env`，不要提交到仓库。项目运行配置项如下：
+SearXNG 默认监听 `127.0.0.1:28770`（随 `COMPANY_AGENT_PORT_BASE` 或 `COMPANY_AGENT_SEARCH_PORT` 派生），JSON 输出由 `deploy/search/settings.yml` 显式启用，镜像固定到已验证的 digest。它不运行模型或嵌入服务。SearXNG 使用固定 Docker 网桥 `br-agent-search`；`anythingllm-egress-firewall.service` 只允许 AnythingLLM 和 SearXNG 网桥向外建立 TCP 443 连接并允许已建立连接的回包，不开放容器入站端口。秘密 `SEARXNG_SECRET` 保存在 WSL 私有配置文件 `~/.config/company-agent/search.env`，不要提交到仓库。项目运行配置项如下：
 
 ```text
 COMPANY_AGENT_WEB_GATE_OWNER=admin
 COMPANY_AGENT_KNOWLEDGE_API_OWNER=admin
 COMPANY_AGENT_WEB_GATE_HOST=127.0.0.1
-COMPANY_AGENT_WEB_GATE_PORT=8767
-COMPANY_AGENT_WEB_GATE_URL=http://127.0.0.1:8767/internal/web/authorize
-COMPANY_AGENT_WEB_SEARCH_URL=http://127.0.0.1:8888/search
+COMPANY_AGENT_WEB_GATE_PORT=28767
+COMPANY_AGENT_WEB_GATE_URL=http://127.0.0.1:28767/internal/web/authorize
+COMPANY_AGENT_WEB_SEARCH_URL=http://127.0.0.1:28770/search
 COMPANY_AGENT_WEB_SEARCH_TIMEOUT_SECONDS=20
 ```
 
@@ -25,14 +25,14 @@ COMPANY_AGENT_WEB_SEARCH_TIMEOUT_SECONDS=20
 ```bash
 docker compose --project-name company-agent-search --env-file ~/.config/company-agent/search.env -f deploy/search/compose.yaml up -d
 sudo systemctl restart anythingllm-egress-firewall.service
-curl 'http://127.0.0.1:8888/search?q=检索测试&format=json'
+curl 'http://127.0.0.1:28770/search?q=检索测试&format=json'
 ```
 
 失败时：
 
 - 控制台开关关闭或请求未被允许：DSSuperAgent 返回 `webSearchDisabled`。
-- Company Agent 网关不可达：检查 8767 端口、网关所有者及桥接密钥。
-- SearXNG 不可达或响应错误：检查 8888 端口、容器健康与日志；Company Agent 以失败状态返回，不会编造搜索结果。
+- Company Agent 网关不可达：检查 `28767` 端口（或 `COMPANY_AGENT_WEB_GATE_PORT`）、网关所有者及桥接密钥。
+- SearXNG 不可达或响应错误：检查 `28770` 端口（或 `COMPANY_AGENT_SEARCH_PORT`）、容器健康与日志；Company Agent 以失败状态返回，不会编造搜索结果。
 - SearXNG 返回空结果：检查 `company-agent-search-network` 是否绑定到 `br-agent-search`，并确认 `DOCKER-USER` 有该网桥到默认外网网卡的 TCP 443 放行和回包规则。SearXNG 是独立网桥，AnythingLLM 的出站规则不会自动覆盖它。
 - 结果中有不可响应或 CAPTCHA 的搜索引擎时，SearXNG 仍会合并其他实际返回结果的引擎；每条来源保留实际 engine 字段供检查。
 
