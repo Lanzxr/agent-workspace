@@ -1,6 +1,6 @@
 # 受控联网检索
 
-DSSuperAgent 的联网搜索不依赖 API-ZENO 模型账号，也不调用需要 DeepSeek 搜索密钥的 DSH 搜索提供方。模型继续由 `AGENT_MODEL_URL`、`AGENT_MODEL_NAME` 和 `AGENT_MODEL_API_KEY` 配置；搜索由自托管 SearXNG 执行。
+DSSuperAgent 的联网搜索不依赖上游大模型网关账号，也不调用需要 DeepSeek 搜索密钥的 DSH 搜索提供方。模型继续由 `AGENT_MODEL_URL`、`AGENT_MODEL_NAME` 和 `AGENT_MODEL_API_KEY` 配置；搜索由自托管 SearXNG 执行。
 
 DSSuperAgent 主会话没有联网工具；需要实时信息时由它派发 worker 任务。worker 只注册 `orchestrator_web_search` 和 `orchestrator_web_fetch` 受控工具，不注册 DSH 原生 `tool-web`。Company Agent 校验桥接密钥和控制台中的 `dssuperagent_web_search_enabled`；开关关闭则拒绝，开启才调用本机 SearXNG JSON API。网页读取也先经过同一开关，再由 DSH HTTP fetch 执行。控制台可即时开关；审计日志保存查询哈希而不保存原始搜索文字。DSH 核心未修改。
 
@@ -38,7 +38,7 @@ curl 'http://127.0.0.1:8888/search?q=检索测试&format=json'
 
 ## 模型/搜索问题排查
 
-模型调用成功只说明 API-ZENO 模型链路可用，不代表搜索链路可用。搜索是否真正完成，应同时核验控制台开关、Company Agent 审计记录、SearXNG 返回的来源 URL 和 engine。不得因搜索失败就把模型 API 切换到 DeepSeek，也不要把开关 200、进程健康或模型正常误当成搜索结果。
+模型调用成功只说明上游模型链路可用，不代表搜索链路可用。搜索是否真正完成，应同时核验控制台开关、Company Agent 审计记录、SearXNG 返回的来源 URL 和 engine。不得因搜索失败就把模型 API 切换到 DeepSeek，也不要把开关 200、进程健康或模型正常误当成搜索结果。
 
 
 ## 构建与运行版本

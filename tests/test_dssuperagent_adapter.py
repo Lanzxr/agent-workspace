@@ -118,7 +118,7 @@ class DssuperAgentAdapterTests(unittest.TestCase):
 
     def test_classify_message_posts_to_triage_endpoint_and_validates_result(self) -> None:
         self.post_response_status = 200
-        self.post_response_body = {"classification": "ongoing_discussion", "reason": "Group pricing debate", "model": "zeno/ds"}
+        self.post_response_body = {"classification": "ongoing_discussion", "reason": "Group pricing debate", "model": "custom/ds"}
         res = self.adapter.classify_message(
             source_type="qq.group",
             conversation_id="grp-1",
@@ -134,7 +134,7 @@ class DssuperAgentAdapterTests(unittest.TestCase):
         self.assertEqual(body["actor_label"], "张三")
         self.assertEqual(body["bot_aliases"], ["憨憨"])
         self.assertEqual(res.classification, "ongoing_discussion")
-        self.assertEqual(res.model, "zeno/ds")
+        self.assertEqual(res.model, "custom/ds")
 
         self.post_response_body = {"classification": "invalid_bucket", "reason": "bad"}
         with self.assertRaises(DssuperAgentProtocolError):

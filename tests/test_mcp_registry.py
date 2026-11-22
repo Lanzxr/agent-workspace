@@ -51,17 +51,17 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
 
     def test_mcp_spec_validation_rejects_inline_secrets_bad_urls_and_reserved_vars(self) -> None:
         spec = McpServerSpec.from_dict({
-            "server_id": "apizeno_ro",
-            "description": "只读查询中转站余额与用量",
+            "server_id": "biz_ro",
+            "description": "只读查询业务余额与用量",
             "transport": "stdio",
             "access_level": "internal",
             "command": "python3",
-            "args": ["/opt/mcp/apizeno.py"],
-            "env_refs": {"APIZENO_KEY": "COMPANY_AGENT_MCP_SECRET_APIZENO"},
+            "args": ["/opt/mcp/biz_ro.py"],
+            "env_refs": {"SERVICE_API_KEY": "COMPANY_AGENT_MCP_SECRET_BIZ_RO"},
         })
-        self.assertEqual(spec.server_id, "apizeno_ro")
+        self.assertEqual(spec.server_id, "biz_ro")
         self.assertEqual(spec.access_level, "internal")
-        self.assertEqual(spec.referenced_host_env_vars(), ("COMPANY_AGENT_MCP_SECRET_APIZENO",))
+        self.assertEqual(spec.referenced_host_env_vars(), ("COMPANY_AGENT_MCP_SECRET_BIZ_RO",))
 
         http_spec = McpServerSpec.from_dict({
             "server_id": "billing_ro",
@@ -126,13 +126,13 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
         env_path = self.root / "runtime.env"
         mcp_json = json.dumps([
             {
-                "server_id": "apizeno_ro",
-                "description": "Apizeno read-only queries",
+                "server_id": "biz_ro",
+                "description": "Business system read-only queries",
                 "transport": "stdio",
                 "access_level": "internal",
                 "command": "python3",
-                "args": ["/opt/apizeno_mcp.py"],
-                "env_refs": {"APIZENO_KEY": "COMPANY_AGENT_MCP_SECRET_APIZENO"},
+                "args": ["/opt/biz_ro_mcp.py"],
+                "env_refs": {"SERVICE_API_KEY": "COMPANY_AGENT_MCP_SECRET_BIZ_RO"},
             }
         ])
         env_path.write_text(
@@ -141,18 +141,18 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
                 "AGENT_MODEL_API_KEY=model-secret-value-111",
                 "AGENT_MODEL_NAME=deepseek-v4.1-flash",
                 f"COMPANY_AGENT_MCP_SERVERS={mcp_json}",
-                "COMPANY_AGENT_MCP_SECRET_APIZENO=apizeno-super-secret-xyz",
+                "COMPANY_AGENT_MCP_SECRET_BIZ_RO=biz-super-secret-xyz",
                 "COMPANY_AGENT_MCP_SECRET_EXTRA=extra-secret-999",
             ]),
             encoding="utf-8",
         )
         cfg = RuntimeConfig.load(env_path)
         self.assertEqual(len(cfg.mcp_servers), 1)
-        self.assertEqual(cfg.mcp_servers[0].server_id, "apizeno_ro")
-        self.assertNotIn("apizeno-super-secret-xyz", repr(cfg))
-        redacted = cfg.redact("Leak test model-secret-value-111 and apizeno-super-secret-xyz + extra-secret-999")
+        self.assertEqual(cfg.mcp_servers[0].server_id, "biz_ro")
+        self.assertNotIn("biz-super-secret-xyz", repr(cfg))
+        redacted = cfg.redact("Leak test model-secret-value-111 and biz-super-secret-xyz + extra-secret-999")
         self.assertNotIn("model-secret-value-111", redacted)
-        self.assertNotIn("apizeno-super-secret-xyz", redacted)
+        self.assertNotIn("biz-super-secret-xyz", redacted)
         self.assertNotIn("extra-secret-999", redacted)
         self.assertEqual(redacted.count("[REDACTED]"), 3)
 
@@ -166,13 +166,13 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
             "header_env_refs": {"Authorization": "Bearer ${COMPANY_AGENT_MCP_SECRET_PUBLIC}"},
         })
         internal_mcp = McpServerSpec.from_dict({
-            "server_id": "apizeno_ro",
-            "description": "Internal Apizeno query",
+            "server_id": "biz_ro",
+            "description": "Internal business query",
             "transport": "stdio",
             "access_level": "internal",
             "command": "python3",
-            "args": ["/opt/mcp/apizeno.py"],
-            "env_refs": {"APIZENO_KEY": "COMPANY_AGENT_MCP_SECRET_INTERNAL"},
+            "args": ["/opt/mcp/biz_ro.py"],
+            "env_refs": {"SERVICE_API_KEY": "COMPANY_AGENT_MCP_SECRET_INTERNAL"},
         })
         admin_mcp = McpServerSpec.from_dict({
             "server_id": "admin_ops",
@@ -214,12 +214,12 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
 
         internal_patch = adapter._build_provider_patch(runtime_home / "r", web_enabled=False, workspace_tier="internal")
         internal_ids = [item["id"] for blk in internal_patch if "insert" in blk for item in blk["insert"]]
-        self.assertEqual(internal_ids, ["company-agent-mcp-public_faq", "company-agent-mcp-apizeno_ro"])
+        self.assertEqual(internal_ids, ["company-agent-mcp-public_faq", "company-agent-mcp-biz_ro"])
         self.assertNotIn("secret-internal-222", json.dumps(internal_patch))
 
         admin_patch = adapter._build_provider_patch(runtime_home / "r", web_enabled=False, workspace_tier="admin")
         admin_ids = [item["id"] for blk in admin_patch if "insert" in blk for item in blk["insert"]]
-        self.assertEqual(admin_ids, ["company-agent-mcp-public_faq", "company-agent-mcp-apizeno_ro", "company-agent-mcp-admin_ops"])
+        self.assertEqual(admin_ids, ["company-agent-mcp-public_faq", "company-agent-mcp-biz_ro", "company-agent-mcp-admin_ops"])
         self.assertNotIn("secret-admin-333", json.dumps(admin_patch))
 
         # Wrapup patch excludes MCP completely
@@ -251,9 +251,9 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
         )
         task = adapter.preflight(req, self.ws)
         contract = adapter._build_execution_contract(req, task, web_enabled=False, mcp_servers=(internal_mcp,))
-        self.assertIn("mcp__apizeno_ro__*", contract)
+        self.assertIn("mcp__biz_ro__*", contract)
         self.assertNotIn("COMPANY_AGENT_MCP_SECRET_INTERNAL", contract)
-        self.assertNotIn("/opt/mcp/apizeno.py", contract)
+        self.assertNotIn("/opt/mcp/biz_ro.py", contract)
 
     def test_workflow_capability_summary_filters_mcp_servers_and_hides_secrets_and_commands(self) -> None:
         identities = IdentityRegistry(self.plane.store)
@@ -264,12 +264,12 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
 
         mcp_list = (
             McpServerSpec.from_dict({
-                "server_id": "apizeno_ro",
-                "description": "Apizeno query",
+                "server_id": "biz_ro",
+                "description": "Business query",
                 "transport": "stdio",
                 "access_level": "internal",
                 "command": "/usr/local/bin/secret-path.py",
-                "env_refs": {"API_KEY": "COMPANY_AGENT_MCP_SECRET_APIZENO"},
+                "env_refs": {"API_KEY": "COMPANY_AGENT_MCP_SECRET_BIZ_RO"},
             }),
             McpServerSpec.from_dict({
                 "server_id": "admin_vault",
@@ -312,30 +312,30 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
         ev_int = Event("ev-i1", "qq.group", "grp-int", "qq:bot1:group:grp-int", "qq-guest", "2026-11-20T00:00:00Z", "hi", [], ["dsh.task"])
         self.plane.ingest_event(ev_int)
         workflow.process_event(ev_int)
-        self.assertEqual([s["id"] for s in seen_caps[-1]["mcp_servers"]], ["apizeno_ro"])
+        self.assertEqual([s["id"] for s in seen_caps[-1]["mcp_servers"]], ["biz_ro"])
         caps_json = json.dumps(seen_caps[-1], ensure_ascii=False)
-        self.assertNotIn("COMPANY_AGENT_MCP_SECRET_APIZENO", caps_json)
+        self.assertNotIn("COMPANY_AGENT_MCP_SECRET_BIZ_RO", caps_json)
         self.assertNotIn("secret-path.py", caps_json)
 
         # L3 admin DM sees both internal + admin MCP
         ev_adm = Event("ev-a1", "qq.c2c", "admin-dm", "qq:bot1:c2c:qq-admin", "admin-u", "2026-11-20T00:00:00Z", "hi", [], ["dsh.task"])
         self.plane.ingest_event(ev_adm)
         workflow.process_event(ev_adm)
-        self.assertEqual([s["id"] for s in seen_caps[-1]["mcp_servers"]], ["apizeno_ro", "admin_vault"])
+        self.assertEqual([s["id"] for s in seen_caps[-1]["mcp_servers"]], ["biz_ro", "admin_vault"])
 
     def test_admin_api_mcp_servers_crud_rejects_secrets_and_audits(self) -> None:
         runtime_mcp = parse_mcp_servers_json(json.dumps([
             {
-                "server_id": "apizeno_ro",
+                "server_id": "biz_ro",
                 "description": "runtime baseline",
                 "transport": "stdio",
                 "access_level": "admin",
                 "command": "python3",
-                "args": ["/opt/apizeno.py"],
-                "env_refs": {"APIZENO_KEY": "COMPANY_AGENT_MCP_SECRET_APIZENO"},
+                "args": ["/opt/biz_ro.py"],
+                "env_refs": {"SERVICE_API_KEY": "COMPANY_AGENT_MCP_SECRET_BIZ_RO"},
             }
         ]))
-        secrets_map = {"COMPANY_AGENT_MCP_SECRET_APIZENO": "top-secret-apizeno-token"}
+        secrets_map = {"COMPANY_AGENT_MCP_SECRET_BIZ_RO": "top-secret-service-token"}
         server = HTTPServer(
             ("127.0.0.1", 0),
             make_handler(
@@ -350,7 +350,7 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
         try:
             with urlopen(Request(base + "/api/mcp-servers", headers=headers)) as r:
                 body = r.read().decode("utf-8")
-                self.assertNotIn("top-secret-apizeno-token", body)
+                self.assertNotIn("top-secret-service-token", body)
                 data = json.loads(body)
                 self.assertEqual(len(data["servers"]), 1)
                 self.assertEqual(data["servers"][0]["missing_secret_vars"], [])
@@ -374,7 +374,7 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
             # Partial override toggling runtime server to internal + disabled
             with urlopen(Request(
                 base + "/api/mcp-servers",
-                data=json.dumps({"server_id": "apizeno_ro", "access_level": "internal", "enabled": False}).encode(),
+                data=json.dumps({"server_id": "biz_ro", "access_level": "internal", "enabled": False}).encode(),
                 headers=headers,
                 method="PUT",
             )) as r:
@@ -403,8 +403,8 @@ class McpRegistryAndIsolationTests(unittest.TestCase):
                 self.assertEqual(metrics_row["missing_secret_vars"], ["COMPANY_AGENT_MCP_SECRET_METRICS"])
 
             # Reset runtime override cleanly
-            with urlopen(Request(base + "/api/mcp-servers?server_id=apizeno_ro", headers=headers, method="DELETE")) as r:
-                reset_row = next(s for s in json.loads(r.read())["servers"] if s["server_id"] == "apizeno_ro")
+            with urlopen(Request(base + "/api/mcp-servers?server_id=biz_ro", headers=headers, method="DELETE")) as r:
+                reset_row = next(s for s in json.loads(r.read())["servers"] if s["server_id"] == "biz_ro")
                 self.assertEqual(reset_row["source"], "runtime")
                 self.assertTrue(reset_row["enabled"])
                 self.assertEqual(reset_row["access_level"], "admin")

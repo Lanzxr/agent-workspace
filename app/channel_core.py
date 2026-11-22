@@ -562,7 +562,7 @@ class BaseChannelService:
                 if sub == "list":
                     items = forge.list_secrets_metadata()
                     if not items:
-                        return "当前凭据保险库为空。添加示例：/forge-secret set APIZENO_KEY <密钥>"
+                        return "当前凭据保险库为空。添加示例：/forge-secret set SERVICE_API_KEY <密钥>"
                     lines = ["已配置的外部凭据别名（仅管理员主机侧持有明文，员工群及 AI 沙箱均不可见）："]
                     for item in items:
                         lines.append(f"- {item['name']} ({item.get('preview', '***')}, length={item.get('length', 0)})")
