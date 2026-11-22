@@ -113,7 +113,7 @@ class ToolForgeTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_ssrf_allowlist_and_dns_rebinding_blocked(self) -> None:
-        self.forge.add_domain("api.zeno.example", created_by="admin-1")
+        self.forge.add_domain("api.example.com", created_by="admin-1")
         self.forge.add_domain("rebind.evil.test", created_by="admin-1")
         self.forge.add_domain("lan-leak.evil.test", created_by="admin-1")
 
@@ -132,18 +132,18 @@ class ToolForgeTests(unittest.TestCase):
             self.forge.probe_http(url="https://lan-leak.evil.test/steal")
 
     def test_secret_vault_redaction_and_http_api_lifecycle(self) -> None:
-        secret_val = "sk-super-secret-zeno-987654"
-        self.forge.add_domain("api.zeno.example", created_by="admin-1")
-        meta = self.forge.set_secret("ZENO_KEY", secret_val, actor="admin-1")
-        self.assertEqual(meta["name"], "ZENO_KEY")
+        secret_val = "sk-super-secret-service-987654"
+        self.forge.add_domain("api.example.com", created_by="admin-1")
+        meta = self.forge.set_secret("SERVICE_API_KEY", secret_val, actor="admin-1")
+        self.assertEqual(meta["name"], "SERVICE_API_KEY")
         self.assertNotIn(secret_val, json.dumps(self.forge.list_secrets_metadata()))
         if os.name != "nt":
             self.assertEqual((self.vault.path.stat().st_mode & 0o777), 0o600)
 
         # Probe injects secret into header cleanly and redacts it from response preview
         probe_res = self.forge.probe_http(
-            url="https://api.zeno.example/v1/echo",
-            headers={"Authorization": "Bearer {{ZENO_KEY}}"},
+            url="https://api.example.com/v1/echo",
+            headers={"Authorization": "Bearer {{SERVICE_API_KEY}}"},
         )
         self.assertEqual(probe_res["status_code"], 200)
         self.assertEqual(self.http_calls[-1]["headers"]["authorization"], f"Bearer {secret_val}")
@@ -151,9 +151,9 @@ class ToolForgeTests(unittest.TestCase):
 
         # Draft http_api v1, test, submit, require admin to approve, then hot-call at internal tier
         self.forge.draft_tool(
-            tool_id="zeno_echo",
+            tool_id="service_echo",
             kind="http_api",
-            description="查询 Zeno 接口状态并返回基础用户信息",
+            description="查询业务示例接口状态并返回基础用户信息",
             when_to_use="管理员或员工查询外部接口连通性时",
             when_not_to_use="无需外部联网的本地计算时",
             operation_type="read",
@@ -165,23 +165,23 @@ class ToolForgeTests(unittest.TestCase):
             },
             http_spec={
                 "method": "GET",
-                "url_template": "https://api.zeno.example/v1/echo",
-                "headers": {"Authorization": "Bearer {{ZENO_KEY}}"},
+                "url_template": "https://api.example.com/v1/echo",
+                "headers": {"Authorization": "Bearer {{SERVICE_API_KEY}}"},
                 "query_template": {"org": "{{args.org}}"},
             },
-            allowed_domains=["api.zeno.example"],
+            allowed_domains=["api.example.com"],
             default_test_input={"org": "acme"},
         )
 
         # Cannot submit before passing test
         with self.assertRaises(ToolForgeValidationError):
-            self.forge.submit_release("zeno_echo")
+            self.forge.submit_release("service_echo")
 
-        test_rep = self.forge.test_tool("zeno_echo")
+        test_rep = self.forge.test_tool("service_echo")
         self.assertTrue(test_rep["ok"])
         self.assertNotIn(secret_val, json.dumps(test_rep))
 
-        prop = self.forge.submit_release("zeno_echo", summary="上线 Zeno 查询 v1")
+        prop = self.forge.submit_release("service_echo", summary="上线业务查询 v1")
         # Non-admin CANNOT approve
         with self.assertRaises(ToolForgeSecurityError):
             self.forge.approve_proposal(prop["proposal_id"], decided_by="emp-1", is_admin=False)
@@ -190,17 +190,17 @@ class ToolForgeTests(unittest.TestCase):
         self.assertEqual(approved["active_version"], 1)
 
         # Tier isolation: internal can call it, common CANNOT
-        out = self.forge.call_active_tool("zeno_echo", {"org": "acme"}, caller_tier="internal")
+        out = self.forge.call_active_tool("service_echo", {"org": "acme"}, caller_tier="internal")
         self.assertIn("org=acme", out["json"]["query"])
         self.assertNotIn(secret_val, json.dumps(out))
         with self.assertRaises(ToolForgeSecurityError):
-            self.forge.call_active_tool("zeno_echo", {"org": "acme"}, caller_tier="common")
+            self.forge.call_active_tool("service_echo", {"org": "acme"}, caller_tier="common")
 
         # Upgrade draft v2 does NOT break live v1 until v2 is tested & approved, and rollback works cleanly
         self.forge.draft_tool(
-            tool_id="zeno_echo",
+            tool_id="service_echo",
             kind="http_api",
-            description="查询 Zeno 接口 v2（增加环境标记）",
+            description="查询业务示例接口 v2（增加环境标记）",
             operation_type="read",
             target_visibility="internal",
             input_schema={
@@ -210,37 +210,37 @@ class ToolForgeTests(unittest.TestCase):
             },
             http_spec={
                 "method": "GET",
-                "url_template": "https://api.zeno.example/v2/echo",
-                "headers": {"Authorization": "Bearer {{ZENO_KEY}}"},
+                "url_template": "https://api.example.com/v2/echo",
+                "headers": {"Authorization": "Bearer {{SERVICE_API_KEY}}"},
                 "query_template": {"org": "{{args.org}}"},
             },
-            allowed_domains=["api.zeno.example"],
+            allowed_domains=["api.example.com"],
             default_test_input={"org": "beta"},
         )
         # Active is still v1
-        still_v1 = self.forge.call_active_tool("zeno_echo", {"org": "acme"}, caller_tier="internal")
+        still_v1 = self.forge.call_active_tool("service_echo", {"org": "acme"}, caller_tier="internal")
         self.assertIn("/v1/echo", still_v1["json"]["query"])
 
-        self.forge.test_tool("zeno_echo", version=2)
-        prop2 = self.forge.submit_release("zeno_echo", version=2)
+        self.forge.test_tool("service_echo", version=2)
+        prop2 = self.forge.submit_release("service_echo", version=2)
         self.forge.approve_proposal(prop2["proposal_id"], decided_by="admin-1", is_admin=True)
-        now_v2 = self.forge.call_active_tool("zeno_echo", {"org": "acme"}, caller_tier="internal")
+        now_v2 = self.forge.call_active_tool("service_echo", {"org": "acme"}, caller_tier="internal")
         self.assertIn("/v2/echo", now_v2["json"]["query"])
 
         # Rollback back to v1
-        rb = self.forge.rollback_tool("zeno_echo", actor="admin-1")
+        rb = self.forge.rollback_tool("service_echo", actor="admin-1")
         self.assertEqual(rb["active_version"], 1)
-        back_v1 = self.forge.call_active_tool("zeno_echo", {"org": "acme"}, caller_tier="internal")
+        back_v1 = self.forge.call_active_tool("service_echo", {"org": "acme"}, caller_tier="internal")
         self.assertIn("/v1/echo", back_v1["json"]["query"])
 
         # Disable blocks execution immediately
-        self.forge.set_tool_enabled("zeno_echo", enabled=False, actor="admin-1")
+        self.forge.set_tool_enabled("service_echo", enabled=False, actor="admin-1")
         with self.assertRaises(ToolForgeValidationError):
-            self.forge.call_active_tool("zeno_echo", {"org": "acme"}, caller_tier="internal")
+            self.forge.call_active_tool("service_echo", {"org": "acme"}, caller_tier="internal")
 
         # Call logs & summary
         tools = {t["tool_id"]: t for t in self.forge.list_tools()}
-        self.assertGreaterEqual(tools["zeno_echo"]["stats"]["calls"], 3)
+        self.assertGreaterEqual(tools["service_echo"]["stats"]["calls"], 3)
 
     def test_python_plugin_ast_security_and_isolated_subprocess_execution(self) -> None:
         # Dangerous imports, dunders, and eval/exec must be rejected statically
@@ -254,8 +254,8 @@ class ToolForgeTests(unittest.TestCase):
                 validate_plugin_ast(bad_code)
 
         secret_val = "sk-plugin-only-host-secret"
-        self.forge.add_domain("api.zeno.example", created_by="admin-1")
-        self.forge.set_secret("ZENO_KEY", secret_val, actor="admin-1")
+        self.forge.add_domain("api.example.com", created_by="admin-1")
+        self.forge.set_secret("SERVICE_API_KEY", secret_val, actor="admin-1")
 
         # Plugin aggregates multi-page logs via ctx.http + checks secret wasn't leaked into child env + signs with hmac
         plugin_code = """
@@ -266,16 +266,16 @@ def run(args, ctx):
     totals = {}
     for page in (1, 2):
         resp = ctx.http.get(
-            "https://api.zeno.example/model-logs",
+            "https://api.example.com/model-logs",
             params={"page": page, "days": days},
-            headers={"Authorization": "Bearer {{ZENO_KEY}}"},
+            headers={"Authorization": "Bearer {{SERVICE_API_KEY}}"},
         )
         for row in resp["json"]["items"]:
             m = row["model"]
             entry = totals.setdefault(m, {"prompt_tokens": 0, "cached_tokens": 0})
             entry["prompt_tokens"] += row["prompt_tokens"]
             entry["cached_tokens"] += row["cached_tokens"]
-    sig = ctx.hmac_sha256("ZENO_KEY", f"days={days}")
+    sig = ctx.hmac_sha256("SERVICE_API_KEY", f"days={days}")
     return {"totals": totals, "sig_len": len(sig)}
 """
         self.forge.draft_tool(
@@ -292,7 +292,7 @@ def run(args, ctx):
                 "required": ["days"],
             },
             python_code=plugin_code,
-            allowed_domains=["api.zeno.example"],
+            allowed_domains=["api.example.com"],
             default_test_input={"days": 7},
         )
         rep = self.forge.test_tool("usage_by_model")
@@ -329,7 +329,7 @@ def run(args, ctx):
         self.assertIn("calc_margin_forge.py", scripts)
 
     def test_mcp_server_endpoints_tier_isolation_and_hot_publish(self) -> None:
-        self.forge.add_domain("api.zeno.example", created_by="admin-1")
+        self.forge.add_domain("api.example.com", created_by="admin-1")
         tokens = ensure_forge_mcp_tokens(self.root)
         # Re-calling preserves existing tokens
         self.assertEqual(ensure_forge_mcp_tokens(self.root), tokens)
@@ -441,9 +441,9 @@ def run(args, ctx):
                     "params": {
                         "name": "forge_draft_tool",
                         "arguments": {
-                            "tool_id": "mcp_zeno_query",
+                            "tool_id": "mcp_service_query",
                             "kind": "http_api",
-                            "description": "MCP 热锻造测试工具：查 Zeno 样本接口",
+                            "description": "MCP 热锻造测试工具：查业务样本接口",
                             "target_visibility": "internal",
                             "operation_type": "read",
                             "input_schema": {
@@ -453,10 +453,10 @@ def run(args, ctx):
                             },
                             "http_spec": {
                                 "method": "GET",
-                                "url_template": "https://api.zeno.example/v1/echo",
+                                "url_template": "https://api.example.com/v1/echo",
                                 "query_template": {"tag": "{{args.tag}}"},
                             },
-                            "allowed_domains": ["api.zeno.example"],
+                            "allowed_domains": ["api.example.com"],
                             "default_test_input": {"tag": "smoke"},
                         },
                     },
@@ -472,7 +472,7 @@ def run(args, ctx):
                 f"{base}/mcp/forge",
                 method="POST",
                 headers=admin_hdr,
-                body={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "forge_test_tool", "arguments": {"tool_id": "mcp_zeno_query"}}},
+                body={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "forge_test_tool", "arguments": {"tool_id": "mcp_service_query"}}},
             )
             self.assertFalse(test_call["result"]["isError"], test_call)
 
@@ -480,7 +480,7 @@ def run(args, ctx):
                 f"{base}/mcp/forge",
                 method="POST",
                 headers=admin_hdr,
-                body={"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "forge_submit_release", "arguments": {"tool_id": "mcp_zeno_query"}}},
+                body={"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "forge_submit_release", "arguments": {"tool_id": "mcp_service_query"}}},
             )
             prop_id = json.loads(submit_call["result"]["content"][0]["text"])["proposal_id"]
 
@@ -492,7 +492,7 @@ def run(args, ctx):
                 headers=int_hdr,
                 body={"jsonrpc": "2.0", "id": 6, "method": "tools/list"},
             )
-            self.assertEqual([t["name"] for t in int_tools_after["result"]["tools"]], ["mcp_zeno_query"])
+            self.assertEqual([t["name"] for t in int_tools_after["result"]["tools"]], ["mcp_service_query"])
 
             _, call_dyn, _ = _http_json(
                 f"{base}/mcp/internal",
@@ -502,7 +502,7 @@ def run(args, ctx):
                     "jsonrpc": "2.0",
                     "id": 7,
                     "method": "tools/call",
-                    "params": {"name": "mcp_zeno_query", "arguments": {"tag": "emp-req"}},
+                    "params": {"name": "mcp_service_query", "arguments": {"tag": "emp-req"}},
                 },
             )
             self.assertFalse(call_dyn["result"]["isError"])
@@ -559,10 +559,10 @@ def run(args, ctx):
         svc.handle_gateway_event("C2C_MESSAGE_CREATE", {
             "id": "m-dm-dom",
             "author": {"user_openid": "qq-boss"},
-            "content": "/forge-domain add api.zeno.example",
+            "content": "/forge-domain add api.example.com",
             "timestamp": "2026-11-21T00:00:02Z",
         })
-        self.assertIn("api.zeno.example", api.sent[-1][1])
+        self.assertIn("api.example.com", api.sent[-1][1])
 
         svc.handle_gateway_event("C2C_MESSAGE_CREATE", {
             "id": "m-dm-sec",
@@ -582,8 +582,8 @@ def run(args, ctx):
             kind="http_api",
             description="QQ 私聊审批测试工具，供内部群查测试接口",
             target_visibility="internal",
-            http_spec={"method": "GET", "url_template": "https://api.zeno.example/v1/echo"},
-            allowed_domains=["api.zeno.example"],
+            http_spec={"method": "GET", "url_template": "https://api.example.com/v1/echo"},
+            allowed_domains=["api.example.com"],
         )
         self.forge.test_tool("dm_flow_tool")
         prop = self.forge.submit_release("dm_flow_tool")
@@ -649,9 +649,9 @@ def run(args, ctx):
         base = f"http://127.0.0.1:{srv.server_address[1]}"
         hdr = {"Authorization": f"Bearer {token}"}
         try:
-            st, dom, _ = _http_json(f"{base}/api/forge/domains", method="POST", headers=hdr, body={"domain": "api.zeno.example"})
+            st, dom, _ = _http_json(f"{base}/api/forge/domains", method="POST", headers=hdr, body={"domain": "api.example.com"})
             self.assertEqual(st, 201)
-            self.assertEqual(dom["domain"], "api.zeno.example")
+            self.assertEqual(dom["domain"], "api.example.com")
 
             st, sec, _ = _http_json(f"{base}/api/forge/secrets", method="POST", headers=hdr, body={"name": "MY_TOK", "value": "secret-abc-999"})
             self.assertEqual(st, 201)
@@ -668,10 +668,10 @@ def run(args, ctx):
                     "target_visibility": "internal",
                     "http_spec": {
                         "method": "GET",
-                        "url_template": "https://api.zeno.example/v1/echo",
+                        "url_template": "https://api.example.com/v1/echo",
                         "headers": {"Authorization": "Bearer {{MY_TOK}}"},
                     },
-                    "allowed_domains": ["api.zeno.example"],
+                    "allowed_domains": ["api.example.com"],
                 },
             )
             _, rep, _ = _http_json(f"{base}/api/forge/tools/test", method="POST", headers=hdr, body={"tool_id": "console_api_tool"})

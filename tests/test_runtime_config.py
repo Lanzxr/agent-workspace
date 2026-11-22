@@ -29,6 +29,10 @@ class RuntimeConfigTests(unittest.TestCase):
             self.assertEqual(config.redact("error test-private-value"), "error [REDACTED]")
             self.assertEqual(patch[1]["config"]["providers"]["company-agent"]["apiKeyEnv"],
                              "COMPANY_AGENT_MODEL_API_KEY")
+            self.assertEqual(
+                patch[1]["config"]["providers"]["company-agent"]["models"],
+                [{"id": "example-model", "contextWindow": 1048576, "maxTokens": 393216}],
+            )
 
     def test_env_parser_preserves_unicode_and_quoted_comment_characters(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

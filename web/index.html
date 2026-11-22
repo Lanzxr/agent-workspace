@@ -360,7 +360,7 @@
         <div id="mcpServersTable"></div>
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
           <div class="form">
-            <input id="mcpServerId" placeholder="服务 ID（如 apizeno_ro）" style="min-width:150px">
+            <input id="mcpServerId" placeholder="服务 ID（如 biz_ro）" style="min-width:150px">
             <select id="mcpAccessLevel">
               <option value="admin">仅管理员私聊 L3 (admin)</option>
               <option value="internal">内部群与管理员 L2+L3 (internal)</option>
@@ -374,7 +374,7 @@
           </div>
           <div class="form">
             <input id="mcpTargetInput" placeholder="stdio 命令及参数 或 HTTP URL（如 http://wsl-host:18768/mcp）" style="flex:1;min-width:260px">
-            <input id="mcpSecretRefInput" placeholder="环境变量引用 JSON（如 {&quot;APIZENO_KEY&quot;:&quot;COMPANY_AGENT_MCP_SECRET_APIZENO&quot;}）" style="flex:1;min-width:260px">
+            <input id="mcpSecretRefInput" placeholder="环境变量引用 JSON（如 {&quot;SERVICE_API_KEY&quot;:&quot;COMPANY_AGENT_MCP_SECRET_BIZ_RO&quot;}）" style="flex:1;min-width:260px">
             <button class="primary" id="mcpSaveBtn">保存 MCP 配置</button>
           </div>
         </div>
@@ -400,7 +400,7 @@
         <div class="card" style="margin:0">
           <h3 style="margin-top:0">2. 隔离凭据保险库（宿主机 0600 加密存放）</h3>
           <div class="bar" style="margin-bottom:8px">
-            <input id="forgeSecretNameInput" placeholder="别名如 APIZENO_KEY" style="min-width:140px">
+            <input id="forgeSecretNameInput" placeholder="别名如 SERVICE_API_KEY" style="min-width:140px">
             <input id="forgeSecretValueInput" type="password" placeholder="密钥明文（保存后不再回显）" style="min-width:180px">
             <button class="primary sm" id="forgeSaveSecretBtn">保存凭据</button>
           </div>

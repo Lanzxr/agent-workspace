@@ -28,6 +28,8 @@ def parse_forge_mcp_settings(values: Mapping[str, str]) -> tuple[bool, str, int,
 
 DSH_VERSION = "0.2.2-rc.1"
 POLICY_VERSION = "workspace-dev-v1"
+DEFAULT_MODEL_CONTEXT_WINDOW = 1048576
+DEFAULT_MODEL_MAX_TOKENS = 393216
 
 
 @dataclass(frozen=True)
@@ -349,7 +351,11 @@ class RuntimeConfig:
                 "api": "openai-completions",
                 "baseURL": self.model_url,
                 "compat": {"supportsDeveloperRole": False, "maxTokensField": "max_tokens"},
-                "models": [{"id": self.model_name, "contextWindow": 128000, "maxTokens": 4096}],
+                "models": [{
+                    "id": self.model_name,
+                    "contextWindow": DEFAULT_MODEL_CONTEXT_WINDOW,
+                    "maxTokens": DEFAULT_MODEL_MAX_TOKENS,
+                }],
             }}}},
             {"id": "llm-deepseek", "disabled": True},
             {"id": "tool-web", "disabled": not enabled},
