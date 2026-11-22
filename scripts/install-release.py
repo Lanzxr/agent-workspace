@@ -287,7 +287,13 @@ def main(argv: list[str] | None = None) -> None:
     node = Path(metadata["node"]).resolve(strict=True)
     dsh_bin = Path(metadata["dsh_bin"]).resolve(strict=True)
     dsh_modules = Path(metadata["dsh_node_modules"]).resolve(strict=True)
-    dsh_home = Path(metadata["dsh_home"]).resolve(strict=True)
+    dsh_home_raw = Path(metadata["dsh_home"])
+    if not dsh_home_raw.exists():
+        dsh_home_raw.mkdir(mode=0o700, parents=True, exist_ok=True)
+        shutil.chown(dsh_home_raw, user=deploy_user, group=deploy_group)
+    dsh_home = dsh_home_raw.resolve(strict=True)
+    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    shutil.chown(STATE, user=deploy_user, group=deploy_group)
     if not node.is_file() or not dsh_bin.is_file() or not dsh_home.is_dir() or dsh_modules.name != "node_modules":
         raise RuntimeError("release runtime paths are incomplete or invalid")
     if str(dsh_bin).startswith("/tmp/"):

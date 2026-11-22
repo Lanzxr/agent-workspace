@@ -43,7 +43,7 @@ Install dependencies and start the adapter after DSSuperAgent is reachable on lo
 
 ```powershell
 python -m pip install -e .
-python -m app --data-dir "$HOME/.local/share/company-agent" qq-serve --config "C:/private/company-agent/runtime.env" --dssuperagent-url http://127.0.0.1:3082
+python -m app --data-dir "$HOME/.local/share/company-agent" qq-serve --config "C:/private/company-agent/runtime.env" --dssuperagent-url http://127.0.0.1:28769
 ```
 
 The process obtains and caches an app access token, gets a Gateway URL, identifies with the group-message intent, maintains heartbeats, and resumes from the last session cursor when QQ permits. Gateway or API failures are reported without printing credentials. Failed Outbox deliveries remain retryable and are retried on a later event or process startup. The active publication allowlist is checked again before every send; queued messages are cancelled if their disposition has since been removed. A process interrupted in `sending` has an unknown delivery result and is intentionally not retried automatically. Inspect it with `python -m app --data-dir <data-dir> outbox list`, verify the QQ group, then use `outbox resolve <outbox-id> --delivered` or `--retry`; both choices are audited.

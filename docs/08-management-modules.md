@@ -1,11 +1,12 @@
 # 管理能力与模块说明
 
-更新日期：2026-11-16
+更新日期：2026-11-22
 
 ## 模块边界
 
 | 模块 | 责任 | 主要入口 |
 |---|---|---|
+| 模型与渠道连接配置 | `/api/settings/runtime-config`、`/api/settings/model-config(/test)`、`/api/settings/channel-config(/test)` 管理主/备大模型接口、上下文与输出容量、推理等级以及 QQ / 企业微信机器人连接参数（密钥脱敏不回显、原子写回 `0600 runtime.env`、支持在线连通性探测与多进程热重载）。 | `app/admin_api.py`、`app/runtime_config.py`、`scripts/run-release.py`、`web/index.html` |
 | 群聊感知与双模式触发设置 | `/api/settings/bot-behavior` 管理 `ambient_listen_enabled`、`ambient_cooldown_seconds`（默认 `300s`，范围 `0–3600s`）与 `bot_aliases`（仅作 DSS 语义分流别名提示，非硬性关键词拦截）；`/api/capability-gaps` 展示 Mode 2 沉淀的能力缺口提升列表。 | `app/admin_api.py`、`web/index.html` |
 | 共享工具与组件层 | `/api/tools*` 管理 `common`（全层只读）与 `internal`（L2/L3 只读、L1 隔离）脚本及 Python `pip --target` 包，并支持预装 `openpyxl` 到 `common` 供表格解析/生成复用。 | `app/shared_tools.py`、`app/admin_api.py` |
 | 受控 MCP 工具服务 | `/api/mcp-servers` 结合 `COMPANY_AGENT_MCP_SERVERS` 管理受控 `stdio` / `streamable-http` MCP 服务（支持 `http://wsl-host:<port>/mcp` 自动解析 WSL2 到 Windows 宿主机的默认网关），按 `admin` / `internal` / `common` 权限分级挂载到 DSH 主进程，仅保存环境变量名引用，密钥留在 `runtime.env` 并由 Bubblewrap `--unsetenv` 从 `bash` 沙箱彻底擦除。 | `app/mcp_registry.py`、`app/dsh_plugins/controlled-mcp.mjs`、`app/admin_api.py`、`web/index.html` |
@@ -61,7 +62,7 @@ $env:COMPANY_AGENT_ADMIN_TOKEN = "<随机生成的至少24字符令牌>"
 py -m app --data-dir "$HOME/.local/share/company-agent" admin-serve --config "$HOME/.config/company-agent/runtime.env"
 ```
 
-打开 `http://127.0.0.1:8765` 并输入令牌。服务默认只监听 loopback；远程管理应放在带 TLS 和身份认证的反向代理后，不要直接绑定公网地址。管理网页使用 `sessionStorage` 保存令牌。
+打开 `http://127.0.0.1:28765` 并输入令牌。服务默认只监听 loopback；远程管理应放在带 TLS 和身份认证的反向代理后，不要直接绑定公网地址。管理网页使用 `sessionStorage` 保存令牌。
 
 ## 联网检索
 
@@ -72,7 +73,7 @@ py -m app --data-dir "$HOME/.local/share/company-agent" admin-serve --config "$H
 
 这样可以只允许 DSSuperAgent 查资料，也可以只允许获准的 DSH 任务联网。两层权限互不替代，资料库检索也不受这两个开关影响。
 
-受控网关默认监听 `127.0.0.1:8767`，配置项是 `COMPANY_AGENT_WEB_GATE_HOST`、`COMPANY_AGENT_WEB_GATE_PORT`、`COMPANY_AGENT_WEB_GATE_API_KEY`。DSSuperAgent 进程需要继承 `COMPANY_AGENT_WEB_GATE_URL`（默认 `http://127.0.0.1:8767/internal/web/authorize`）和同一个 API Key（非 loopback 部署必须设置至少 32 个字符）。搜索结果由 DSH 官方 Web seam 返回，包含来源 URL；Company Agent 只负责权限、审计和即时开关，不改 DSH 本体。
+受控网关默认监听 `127.0.0.1:28767`（由 `COMPANY_AGENT_PORT_BASE` 或 `COMPANY_AGENT_WEB_GATE_PORT` 控制），配置项是 `COMPANY_AGENT_WEB_GATE_HOST`、`COMPANY_AGENT_WEB_GATE_PORT`、`COMPANY_AGENT_WEB_GATE_API_KEY`。DSSuperAgent 进程继承 `COMPANY_AGENT_WEB_GATE_URL`（默认 `http://127.0.0.1:28767/internal/web/authorize`）和同一个 API Key（非 loopback 部署必须设置至少 32 个字符）。搜索结果由 DSH 官方 Web seam 返回，包含来源 URL；Company Agent 只负责权限、审计和即时开关，不改 DSH 本体。
 
 ## 验收范围
 

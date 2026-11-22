@@ -98,7 +98,7 @@ sudo apt-get install -y python3 python3-venv python3-pip bubblewrap git curl xz-
    sudo -u <USER> mkdir -p /home/<USER>/.local/share/company-agent /home/<USER>/.config/company-agent /home/<USER>/company-agent-step0/superagent-home
    sudo -u <USER> chmod 700 /home/<USER>/.local/share/company-agent /home/<USER>/.config/company-agent
    sudo -u <USER> python3 -m venv /home/<USER>/.local/share/company-agent/venv
-   sudo -u <USER> /home/<USER>/.local/share/company-agent/venv/bin/pip install --upgrade pip "websockets>=12,<17" "cryptography>=42,<52" pypdf
+   sudo -u <USER> /home/<USER>/.local/share/company-agent/venv/bin/pip install --upgrade pip setuptools wheel "websockets>=12,<17" "cryptography>=42,<52" pypdf
    ```
 
 4. **安装 Node.js（22.19+ 或 24+）、pnpm 与 `@deepseek-ai/dsh@0.2.2-rc.1`**：
@@ -128,29 +128,32 @@ sudo apt-get install -y python3 python3-venv python3-pip bubblewrap git curl xz-
   sudo -u <USER> chmod 600 /home/<USER>/.config/company-agent/runtime.env
   ```
 
-必填核心配置项核对清单：
+必填核心配置项核对清单（首次安装只需填好 **第 1、2 项** 即可启动控制台，主/备模型与 QQ / 企微机器人连接参数在服务启动后均可在 Web 控制台 `http://127.0.0.1:28765` →「权限与联网开关」直接可视化修改、测试连通性并自动热重载生效）：
 
 ```dotenv
-# 1. 上游大模型与 DSH 执行（必填）
+# 1. 上游大模型与 DSH 执行（必填；可在 Web 控制台随时热修改并配置备用容灾模型）
 AGENT_MODEL_URL=https://api.example.com/v1
-AGENT_MODEL_NAME=deepseek-chat
+AGENT_MODEL_NAME=deepseek-v4.1-flash
 AGENT_MODEL_API_KEY=<替换为模型接口密钥>
+# 可选备用模型（主模型在启动阶段报上游错误时自动切换重跑 1 次）
+# AGENT_MODEL_FALLBACK_NAME=glm-5.3
 
-# 2. 本地管理控制台鉴权（必填：强随机 32+ 字符）
+# 2. 本地管理控制台鉴权（必填：强随机 24+ 字符）
 COMPANY_AGENT_ADMIN_TOKEN=<替换为强随机管理员令牌>
 
-# 3. QQ Bot 接入（仅启用 qq-serve 时必填；与企业微信互不冲突可单独或双开）
+# 3. QQ Bot 接入（可选；也可在 Web 控制台填写并测试凭据）
 QQBOT_APP_ID=<你的QQ机器人AppID>
 QQBOT_CLIENT_SECRET=<你的QQ机器人Secret>
 QQBOT_ALLOWED_PUBLICATIONS=group_update
 QQBOT_AUTO_EXECUTE_CAPABILITIES=dsh.task
+COMPANY_AGENT_QQ_WORKSPACE=qq-agent
 
-# 3b. 企业微信（WeCom）智能机器人长连接接入（仅启用 wecom-serve 时必填）
+# 3b. 企业微信（WeCom）智能机器人长连接接入（可选；也可在 Web 控制台填写并测试连通性）
 WECOM_BOT_ID=<你的企微机器人BotID>
 WECOM_BOT_SECRET=<你的企微机器人Secret>
 WECOM_ALLOWED_PUBLICATIONS=group_update
 WECOM_AUTO_EXECUTE_CAPABILITIES=dsh.task
-COMPANY_AGENT_WECOM_WORKSPACE=wecom-files
+COMPANY_AGENT_WECOM_WORKSPACE=wecom-agent
 
 # 4. 端口与内部网关配置（默认 28765-28771；若冲突只需改 COMPANY_AGENT_PORT_BASE 即可整体平移）
 # COMPANY_AGENT_PORT_BASE=28765
@@ -208,12 +211,14 @@ pnpm install --frozen-lockfile
 pnpm build
 cd ..
 
-# 2. 构建 Company Agent Wheel
+# 2. 使用已安装 setuptools/wheel 的虚拟环境构建 Company Agent Wheel
+VENV_PY="/home/<USER>/.local/share/company-agent/venv/bin/python"
 mkdir -p /tmp/ca-wheels
-python3 -m pip wheel --no-deps --no-build-isolation -w /tmp/ca-wheels ./company-agent
+rm -f /tmp/ca-wheels/*.whl
+"$VENV_PY" -m pip wheel --no-deps --no-build-isolation -w /tmp/ca-wheels ./company-agent
 
 # 3. 打包完整发布归档 (.tar.gz)
-python3 company-agent/scripts/build-release.py \
+"$VENV_PY" company-agent/scripts/build-release.py \
   --dss-source ./dssuperagent-company-agent-step4 \
   --wheel /tmp/ca-wheels/company_agent_control_plane-0.1.0-py3-none-any.whl \
   --node <NODE_BIN> \
@@ -241,16 +246,16 @@ sudo python3 ./company-agent/scripts/install-release.py \
 
 可选高级覆盖参数：`--group`、`--home`、`--deploy-dir`、`--data-dir`、`--config`（默认自动按目标账号家目录推导，不能置于 `/tmp`、`/mnt` 或 `/run`）。
 
-### 6.3 首次配置 DSSuperAgent 上游面板
+### 6.3 登录管理控制台与模型/渠道可视化配置
 
-服务拉起后，查看 `company-agent-superagent.service` 日志中打印的带一次性 token 的本机地址（默认 `http://127.0.0.1:28769/?token=...`）：
+`run-release.py` 启动时会自动初始化 `<DSH_HOME>/profiles/superagent` 并将 `runtime.env` 中的模型参数同步注入 DSSuperAgent 与 DSH 执行器，**无需手工编辑 `cordis.patch.yml`**。
 
-- **WSL2 本机**：直接在 Windows 浏览器打开即可；
+- **WSL2 本机**：直接在 Windows 浏览器打开 `http://127.0.0.1:28765`；
 - **纯 Linux 云/内网服务器**：通过 SSH 隧道映射到本地浏览：
   ```bash
-  ssh -N -L 28765:127.0.0.1:28765 -L 28769:127.0.0.1:28769 <SSH用户>@<服务器IP>
+  ssh -N -L 28765:127.0.0.1:28765 <SSH用户>@<服务器IP>
   ```
-  然后在本地浏览器打开 `http://127.0.0.1:28769/?token=...` 确认模型 Provider 与插件状态就绪，再打开 `http://127.0.0.1:28765` 登录管理控制台（如调整了端口或 `COMPANY_AGENT_PORT_BASE` 则替换为对应实际端口）。
+- 输入 `COMPANY_AGENT_ADMIN_TOKEN` 登录后，可在「**权限与联网开关**」页签直接查看、测试并修改主/备模型接口及 QQ / 企业微信连接凭据（保存后新 DSH 任务立即生效，协调器与在线渠道进程在约 2 秒内自动平滑热重载）。
 
 ---
 
