@@ -964,6 +964,97 @@ class ControlPlane:
                 run.error_category = "abandoned_queue"
                 run.error = "Execution remained queued without an active workspace executor"
                 self.save_assistant_run(run)
+        reconciled.extend(self.reconcile_interrupted_running(manager, min_age_seconds=min_age_seconds))
+        return reconciled
+
+    def reconcile_interrupted_running(self, manager: Any, *, min_age_seconds: float = 60.0) -> list[str]:
+        """Settle stale running executions whose workspace lease is no longer held by any active process."""
+        from .execution_state import ExecutionBusy
+        from .runtime_config import POLICY_VERSION
+
+        reconciled: list[str] = []
+        now_dt = datetime.now(timezone.utc)
+        rows = self.store.connection.execute(
+            "SELECT execution_id, work_item_id, updated_at, payload FROM executions WHERE status = 'running'"
+        ).fetchall()
+        base_dir = getattr(manager, "base_directory", None)
+        receipt_dir = (base_dir.parent / "runtime" / "receipts") if isinstance(base_dir, Path) else None
+        for row in rows:
+            execution_id = str(row[0])
+            work_item_id = str(row[1])
+            try:
+                updated_dt = datetime.fromisoformat(str(row[2]))
+            except ValueError:
+                continue
+            if (now_dt - updated_dt).total_seconds() < min_age_seconds:
+                continue
+            request = ExecutionRequest.from_dict(self.store.decode(row[3]))
+            try:
+                with manager.execution_lease(request.workspace_id, wait_seconds=0.0):
+                    current = self.get_execution(execution_id)
+                    if current.status != "running":
+                        continue
+                    result: ExecutionResult | None = None
+                    if receipt_dir is not None:
+                        receipt_path = receipt_dir / f"{execution_id}.json"
+                        if receipt_path.is_file() and not receipt_path.is_symlink():
+                            try:
+                                envelope = json.loads(receipt_path.read_text(encoding="utf-8"))
+                                candidate = ExecutionResult(**envelope["result"])
+                                if candidate.execution_id == execution_id and candidate.status in {
+                                    "succeeded", "failed", "timed_out", "cancelled",
+                                }:
+                                    result = candidate
+                            except Exception:
+                                result = None
+                    if result is None:
+                        result = ExecutionResult(
+                            execution_id,
+                            "failed",
+                            error="Execution was interrupted without a result receipt; inspect its effects before creating a new request",
+                            metadata={
+                                "workspace_id": request.workspace_id,
+                                "error_category": "interrupted",
+                                "finished_at": self.now(),
+                                "policy_version": POLICY_VERSION,
+                            },
+                        )
+                    try:
+                        ws = manager.get(request.workspace_id)
+                        if ws.status in {"ready", "running", "recovering"}:
+                            manager.save_execution_record(request.workspace_id, {
+                                "execution_id": execution_id,
+                                "runtime": "dsh",
+                                "status": result.status,
+                                "result": result.to_dict(),
+                            })
+                            if ws.status in {"running", "recovering"}:
+                                manager.mark_ready(request.workspace_id)
+                    except Exception:
+                        pass
+                    self.record_execution_result(result)
+            except (ExecutionBusy, InvalidTransition, NotFound, OSError, ValueError):
+                continue
+            reconciled.append(execution_id)
+            try:
+                run = self.get_assistant_run_for_work_item(work_item_id)
+            except NotFound:
+                continue
+            existing_ids = {
+                r.get("execution_id") for r in run.execution_results if isinstance(r, dict)
+            }
+            if execution_id not in existing_ids:
+                run.execution_results.append(result.to_dict())
+            if run.status in {"executing", "authorizing"}:
+                if result.status == "succeeded":
+                    run.status = "completed"
+                    run.error = None
+                    run.error_category = None
+                else:
+                    run.status = "execution_failed"
+                    run.error_category = str((result.metadata or {}).get("error_category") or "interrupted")
+                    run.error = result.error or "Execution was interrupted"
+                self.save_assistant_run(run)
         return reconciled
 
     def list_audit(self, *, entity_type: str, entity_id: str) -> list[AuditEntry]:

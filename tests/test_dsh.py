@@ -617,6 +617,45 @@ class DshExecutionTests(unittest.TestCase):
             releaser.join(timeout=2.0)
         self.assertEqual(order[-1], "external-ok")
 
+    def test_upstream_error_reason_detail_is_exposed_and_redacted(self) -> None:
+        self.create_request("upstream-404-error")
+        result = self.dispatcher.dispatch("execution-1")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.metadata["error_category"], "upstream_error")
+        self.assertIn("HTTP_404", result.error or "")
+        self.assertIn("model_not_found", result.error or "")
+        self.assertNotIn("test-secret-key", result.error or "")
+        self.assertEqual(result.metadata["dsh_error"]["code"], "HTTP_404")
+        self.assertNotIn("test-secret-key", result.metadata["dsh_error"]["message"])
+
+    def test_automatic_fallback_model_retries_when_primary_fails_before_tools(self) -> None:
+        fb_config = replace(
+            self.config,
+            fallback_model_name="backup-model",
+            fallback_model_url="https://backup.example/v1",
+            fallback_api_key="backup-secret-key",
+        )
+        self.adapter = DshAdapter(
+            fb_config, self.manager, self.root / "runtime", bubblewrap_executable=self.bubblewrap,
+        )
+        self.dispatcher = ExecutionDispatcher(self.plane, self.manager, self.adapter, self.root / "runtime")
+        self.create_request("primary-fails-fallback-succeeds")
+        result = self.dispatcher.dispatch("execution-1")
+        self.assertEqual(result.status, "succeeded", result.error)
+        self.assertEqual(result.metadata["fallback_model"]["primary_model"], "fixture-model")
+        self.assertEqual(result.metadata["fallback_model"]["fallback_model"], "backup-model")
+        self.assertEqual(result.metadata["fallback_model"]["primary_error_category"], "upstream_error")
+
+    def test_max_tokens_triggers_same_session_wrapup_and_recovers_artifact(self) -> None:
+        self.create_request("max-tokens-wrapup", timeout=30.0, soft_wrapup=4.0, require_user_reply=True)
+        result = self.dispatcher.dispatch("execution-1")
+        self.assertEqual(result.status, "succeeded", result.error)
+        self.assertTrue(result.metadata["soft_wrapup"]["triggered"])
+        self.assertEqual(result.metadata["soft_wrapup"]["reason"], "max_tokens")
+        self.assertTrue(result.metadata["soft_wrapup"]["succeeded"])
+        artifact = (self.workspace.root / "artifacts/result.json").read_text(encoding="utf-8")
+        self.assertIn("max-tokens partial summary", artifact)
+
 
 if __name__ == "__main__":
     unittest.main()

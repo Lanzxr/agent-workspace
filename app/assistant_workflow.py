@@ -9,7 +9,8 @@ from typing import Any, Callable, Sequence
 
 from .control_plane import ControlPlane, ControlPlaneError, InvalidTransition, NotFound
 from .dssuperagent import (DEFAULT_DECISION_TIMEOUT_SECONDS, DssuperAgentAdapter, DssuperAgentError,
-                           DssuperAgentProtocolError, DssuperAgentReceipt)
+                           DssuperAgentProtocolError, DssuperAgentReceipt, DssuperAgentTimeout,
+                           DssuperAgentUnavailable)
 from .execution import ExecutionDispatcher
 from .execution_state import ExecutionBusy
 from .identity import IdentityRegistry
@@ -131,8 +132,17 @@ class DssuperAgentWorkflow:
                 decision = self.upstream.wait_for_decision(
                     receipt.thread_key, receipt.trigger_id, timeout=self.decision_timeout
                 )
+                if decision.outcome == "unavailable" or decision.kind == "unavailable":
+                    run.decision_id = decision.decision_id
+                    run.decision = decision.to_dict()
+                    err_cat, err_msg = decision.unavailable_reason_summary()
+                    err = DssuperAgentTimeout(err_msg) if err_cat == "eval_timeout" else DssuperAgentUnavailable(err_msg)
+                    err.category = err_cat
+                    raise err
                 if decision.kind != "ignore" or decision.outcome not in {"ignore", "wouldAccept"}:
                     raise DssuperAgentProtocolError("Company Agent events must remain proposals in DSSuperAgent")
+                if not isinstance(decision.assistant_intent, dict):
+                    raise DssuperAgentProtocolError("DSSuperAgent decision has no structured assistant intent")
                 run.decision_id = decision.decision_id
                 run.decision = decision.to_dict()
                 run.publication = dict(decision.assistant_intent["publication"])

@@ -508,6 +508,90 @@
       </div>
     </div>
 
+    <div class="card" id="modelConfigCard">
+      <div class="bar" style="margin:0 0 8px;justify-content:space-between">
+        <h3 style="margin:0">模型接口与主备自动切换配置</h3>
+        <span id="modelConfigBadge" class="chip">-</span>
+      </div>
+      <p class="hint" style="margin:0 0 10px">统一配置 DSH 任务执行器与 DSSuperAgent 主协调器的模型参数（写入 <code>0600 runtime.env</code>，密钥永不回显前端）。保存后下一条 DSH 任务<strong>免重启立即生效</strong>，DSSuperAgent 协调进程自动检测并平滑重载。若配置了<strong>备用模型</strong>，当主模型在任务启动阶段（尚未产生工具副作用前）发生上游错误时，系统将自动无缝切换到备用模型重跑一次。</p>
+      <div class="form" style="margin-bottom:8px">
+        <label class="small muted" style="flex:1;min-width:220px">主模型 API Base URL：<input id="modelUrlInput" style="width:100%" placeholder="https://models.example/v1"></label>
+        <label class="small muted" style="min-width:180px">主模型名称：<input id="modelNameInput" style="width:100%" placeholder="deepseek-v4.1-flash"></label>
+        <label class="small muted" style="min-width:220px">主模型 API Key（留空保持不变）：<input id="modelApiKeyInput" type="password" autocomplete="new-password" style="width:100%" placeholder="留空保持当前密钥"></label>
+      </div>
+      <div class="form" style="margin-bottom:8px">
+        <label class="small muted">上下文窗口 (Context Window)：<input id="modelContextWindowInput" type="number" min="4096" max="4194304" step="1024" style="width:130px"></label>
+        <label class="small muted">最大输出 (Max Tokens)：<input id="modelMaxTokensInput" type="number" min="512" max="2097152" step="512" style="width:130px"></label>
+        <label class="small muted">推理思考预算 (Reasoning Effort)：
+          <select id="modelReasoningEffortSelect" style="width:150px">
+            <option value="">默认不显式传递</option>
+            <option value="off">off（关闭思考）</option>
+            <option value="low">low（轻量）</option>
+            <option value="medium">medium（均衡）</option>
+            <option value="high">high（深度）</option>
+          </select>
+        </label>
+      </div>
+      <div class="form" style="margin-bottom:10px">
+        <label class="small muted" style="min-width:180px">备用模型名称（可选，留空关闭容灾）：<input id="fallbackModelNameInput" style="width:100%" placeholder="如 glm-5.3 或 deepseek-v4-pro"></label>
+        <label class="small muted" style="flex:1;min-width:220px">备用模型 Base URL（留空复用主 URL）：<input id="fallbackModelUrlInput" style="width:100%" placeholder="留空默认复用主模型地址"></label>
+        <label class="small muted" style="min-width:220px">备用模型 API Key（留空复用主 Key 或原备用 Key）：<input id="fallbackModelApiKeyInput" type="password" autocomplete="new-password" style="width:100%" placeholder="留空复用或保持不变"></label>
+      </div>
+      <div class="form">
+        <button class="primary" id="saveModelConfigBtn">保存模型配置</button>
+        <button id="testPrimaryModelBtn">测试主模型连通性</button>
+        <button id="testFallbackModelBtn">测试备用模型连通性</button>
+      </div>
+    </div>
+
+    <div class="card" id="channelConfigCard">
+      <div class="bar" style="margin:0 0 8px;justify-content:space-between">
+        <h3 style="margin:0">机器人渠道连接参数（QQ / 企业微信）</h3>
+        <div class="bar" style="margin:0;gap:6px">
+          <span id="qqConfigBadge" class="chip">QQ: -</span>
+          <span id="wecomConfigBadge" class="chip">企微: -</span>
+        </div>
+      </div>
+      <p class="hint" style="margin:0 0 10px">管理 QQ 官方机器人与企业微信智能机器人长连接凭据（密钥保存至 <code>0600 runtime.env</code> 且不回显）。保存后在线渠道守护进程会在约 2 秒内自动平滑关闭旧连接并启用新参数重连。</p>
+      <div style="border-top:1px solid var(--line,#e2e8f0);padding-top:10px;margin-top:6px">
+        <h4 style="margin:0 0 8px">1. QQ 官方机器人连接参数</h4>
+        <div class="form" style="margin-bottom:8px">
+          <label class="small muted" style="min-width:160px">QQ AppID：<input id="qqAppIdInput" style="width:100%" placeholder="102000000"></label>
+          <label class="small muted" style="min-width:220px">ClientSecret（留空保持不变）：<input id="qqClientSecretInput" type="password" autocomplete="new-password" style="width:100%" placeholder="留空保持当前密钥"></label>
+          <label class="small muted" style="flex:1;min-width:200px">API Base URL：<input id="qqApiBaseUrlInput" style="width:100%" placeholder="https://api.bot.qq.com"></label>
+        </div>
+        <div class="form" style="margin-bottom:8px">
+          <label class="small muted">允许发布类型：<input id="qqAllowedPubsInput" style="width:180px" placeholder="group_update"></label>
+          <label class="small muted">自动执行能力：<input id="qqAutoExecInput" style="width:140px" placeholder="dsh.task"></label>
+          <label class="small muted">默认工作区 ID：<input id="qqWorkspaceIdInput" style="width:150px" placeholder="qq-default"></label>
+          <label class="small muted"><input id="qqIsolateWsCheckbox" type="checkbox" checked> 按群/私聊独立隔离工作区</label>
+        </div>
+        <div class="form">
+          <button class="primary" id="saveQqConfigBtn">保存 QQ 连接参数</button>
+          <button id="testQqConfigBtn">测试 QQ 凭据</button>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--line,#e2e8f0);padding-top:10px;margin-top:12px">
+        <h4 style="margin:0 0 8px">2. 企业微信智能机器人（WebSocket 长连接）连接参数</h4>
+        <div class="form" style="margin-bottom:8px">
+          <label class="small muted" style="min-width:220px">企业微信 BotID：<input id="wecomBotIdInput" style="width:100%" placeholder="aib..."></label>
+          <label class="small muted" style="min-width:220px">Bot Secret（留空保持不变）：<input id="wecomBotSecretInput" type="password" autocomplete="new-password" style="width:100%" placeholder="留空保持当前密钥"></label>
+          <label class="small muted" style="flex:1;min-width:220px">WebSocket 网关 URL：<input id="wecomWsUrlInput" style="width:100%" placeholder="wss://openws.work.weixin.qq.com"></label>
+        </div>
+        <div class="form" style="margin-bottom:8px">
+          <label class="small muted">允许发布类型：<input id="wecomAllowedPubsInput" style="width:180px" placeholder="group_update"></label>
+          <label class="small muted">自动执行能力：<input id="wecomAutoExecInput" style="width:140px" placeholder="dsh.task"></label>
+          <label class="small muted">默认工作区 ID：<input id="wecomWorkspaceIdInput" style="width:150px" placeholder="wecom-default"></label>
+          <label class="small muted"><input id="wecomIsolateWsCheckbox" type="checkbox" checked> 按群/私聊独立隔离工作区</label>
+          <label class="small muted"><input id="wecomGroupDirectCheckbox" type="checkbox" checked> 群回调默认按直达模式响应</label>
+        </div>
+        <div class="form">
+          <button class="primary" id="saveWecomConfigBtn">保存企微连接参数</button>
+          <button id="testWecomConfigBtn">测试企微网关连通性</button>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <h3 style="margin-top:0">3 层企业权限与位置天花板说明</h3>
       <div class="table-wrap">
@@ -1283,7 +1367,7 @@ async function refresh() {
     renderMetrics(s);
     renderDshTables(s);
 
-    const [conv, u, b, t, w, l, g, dc, k, tools, mcpData, forgeData, gapsData, botCfg, wsFiles, retentionCfg] = await Promise.all([
+    const [conv, u, b, t, w, l, g, dc, k, tools, mcpData, forgeData, gapsData, botCfg, wsFiles, retentionCfg, runtimeCfg] = await Promise.all([
       api('/api/conversations?limit=60'),
       api('/api/users'),
       api('/api/bindings'),
@@ -1300,6 +1384,7 @@ async function refresh() {
       api('/api/settings/bot-behavior'),
       api('/api/workspace-files?limit=150'),
       api('/api/settings/file-retention'),
+      api('/api/settings/runtime-config').catch(() => null),
     ]);
     state.conversations = conv.conversations || [];
     state.usersData = u;
@@ -1341,6 +1426,9 @@ async function refresh() {
     $('retentionBadge').className = 'chip done';
     $('ambientBadge').textContent = botCfg.ambient_listen_enabled ? `旁听已开 (${botCfg.ambient_cooldown_seconds}s)` : '仅直达回复';
     $('ambientBadge').className = `chip ${botCfg.ambient_listen_enabled ? 'done' : ''}`;
+    if (runtimeCfg) {
+      renderRuntimeConfigSection(runtimeCfg);
+    }
   } catch (e) {
     $('status').textContent = '连接异常';
     $('connDot').className = 'dot err';
@@ -1783,6 +1871,136 @@ $('saveBotBehaviorBtn').onclick = () => runAction(() => api('/api/settings/bot-b
 $('saveRetentionBtn').onclick = () => runAction(() => api('/api/settings/file-retention', 'PUT', {
   retention_days: Number($('retentionDaysInput').value || 15),
 }), '工作区文件留存周期已保存');
+
+function renderRuntimeConfigSection(cfg) {
+  const m = cfg.model || {};
+  const ch = cfg.channels || {};
+  const qq = ch.qq || {};
+  const wc = ch.wecom || {};
+  const fbLabel = m.fallback_name ? ` · 备: ${m.fallback_name}` : '';
+  $('modelConfigBadge').textContent = m.name ? `主: ${m.name}${fbLabel}` : '未配置';
+  $('modelConfigBadge').className = `chip ${m.name && m.api_key_configured ? 'done' : 'warn'}`;
+  if (!$('modelConfigCard').contains(document.activeElement)) {
+    $('modelUrlInput').value = m.url || '';
+    $('modelNameInput').value = m.name || '';
+    $('modelApiKeyInput').value = '';
+    $('modelApiKeyInput').placeholder = m.api_key_configured ? `已配置 (${m.api_key_masked})，留空保持不变` : '请输入 API Key';
+    $('modelContextWindowInput').value = String(m.context_window || 1048576);
+    $('modelMaxTokensInput').value = String(m.max_tokens || 393216);
+    $('modelReasoningEffortSelect').value = m.reasoning_effort || '';
+    $('fallbackModelNameInput').value = m.fallback_name || '';
+    $('fallbackModelUrlInput').value = m.fallback_url || '';
+    $('fallbackModelApiKeyInput').value = '';
+    $('fallbackModelApiKeyInput').placeholder = m.fallback_api_key_configured
+      ? `已单独配置 (${m.fallback_api_key_masked})，留空保持不变`
+      : '留空默认复用主模型 API Key';
+  }
+  $('qqConfigBadge').textContent = qq.configured ? `QQ: ${qq.gateway_state || '已配置'}` : 'QQ: 未配置';
+  $('qqConfigBadge').className = `chip ${qq.gateway_state === 'connected' ? 'done' : (qq.configured ? 'l2' : '')}`;
+  $('wecomConfigBadge').textContent = wc.configured ? `企微: ${wc.gateway_state || '已配置'}` : '企微: 未配置';
+  $('wecomConfigBadge').className = `chip ${wc.gateway_state === 'connected' ? 'done' : (wc.configured ? 'l2' : '')}`;
+  if (!$('channelConfigCard').contains(document.activeElement)) {
+    $('qqAppIdInput').value = qq.app_id || '';
+    $('qqClientSecretInput').value = '';
+    $('qqClientSecretInput').placeholder = qq.client_secret_configured ? `已配置 (${qq.client_secret_masked})，留空保持不变` : '请输入 ClientSecret';
+    $('qqApiBaseUrlInput').value = qq.api_base_url || 'https://api.bot.qq.com';
+    $('qqAllowedPubsInput').value = qq.allowed_publications || 'group_update';
+    $('qqAutoExecInput').value = qq.auto_execute_capabilities ?? 'dsh.task';
+    $('qqWorkspaceIdInput').value = qq.workspace_id || 'qq-default';
+    $('qqIsolateWsCheckbox').checked = qq.isolate_workspaces !== false;
+
+    $('wecomBotIdInput').value = wc.bot_id || '';
+    $('wecomBotSecretInput').value = '';
+    $('wecomBotSecretInput').placeholder = wc.bot_secret_configured ? `已配置 (${wc.bot_secret_masked})，留空保持不变` : '请输入 Bot Secret';
+    $('wecomWsUrlInput').value = wc.ws_url || 'wss://openws.work.weixin.qq.com';
+    $('wecomAllowedPubsInput').value = wc.allowed_publications || 'group_update';
+    $('wecomAutoExecInput').value = wc.auto_execute_capabilities ?? 'dsh.task';
+    $('wecomWorkspaceIdInput').value = wc.workspace_id || 'wecom-default';
+    $('wecomIsolateWsCheckbox').checked = wc.isolate_workspaces !== false;
+    $('wecomGroupDirectCheckbox').checked = wc.group_direct_on_callback !== false;
+  }
+}
+
+function collectModelFormPayload(extra = {}) {
+  return {
+    url: $('modelUrlInput').value.trim(),
+    name: $('modelNameInput').value.trim(),
+    api_key: $('modelApiKeyInput').value.trim(),
+    context_window: Number($('modelContextWindowInput').value || 1048576),
+    max_tokens: Number($('modelMaxTokensInput').value || 393216),
+    reasoning_effort: $('modelReasoningEffortSelect').value,
+    fallback_name: $('fallbackModelNameInput').value.trim(),
+    fallback_url: $('fallbackModelUrlInput').value.trim(),
+    fallback_api_key: $('fallbackModelApiKeyInput').value.trim(),
+    ...extra,
+  };
+}
+
+$('saveModelConfigBtn').onclick = () => runAction(async () => {
+  const res = await api('/api/settings/model-config', 'PUT', collectModelFormPayload());
+  $('modelApiKeyInput').value = '';
+  $('fallbackModelApiKeyInput').value = '';
+  renderRuntimeConfigSection(res);
+}, '模型与容灾配置已保存（新 DSH 任务立即生效，协调器将自动热重载）');
+
+$('testPrimaryModelBtn').onclick = () => runAction(async () => {
+  const res = await api('/api/settings/model-config/test', 'POST', collectModelFormPayload({ test_fallback: false }));
+  showToast(res.message || '主模型连接测试通过', res.model_listed === false ? 'err' : 'ok');
+});
+
+$('testFallbackModelBtn').onclick = () => runAction(async () => {
+  const res = await api('/api/settings/model-config/test', 'POST', collectModelFormPayload({ test_fallback: true }));
+  showToast(res.message || '备用模型连接测试通过', res.model_listed === false ? 'err' : 'ok');
+});
+
+function collectQqFormPayload() {
+  return {
+    channel: 'qq',
+    app_id: $('qqAppIdInput').value.trim(),
+    client_secret: $('qqClientSecretInput').value.trim(),
+    api_base_url: $('qqApiBaseUrlInput').value.trim(),
+    allowed_publications: $('qqAllowedPubsInput').value.trim(),
+    auto_execute_capabilities: $('qqAutoExecInput').value.trim(),
+    workspace_id: $('qqWorkspaceIdInput').value.trim(),
+    isolate_workspaces: $('qqIsolateWsCheckbox').checked,
+  };
+}
+
+$('saveQqConfigBtn').onclick = () => runAction(async () => {
+  const res = await api('/api/settings/channel-config', 'PUT', collectQqFormPayload());
+  $('qqClientSecretInput').value = '';
+  renderRuntimeConfigSection(res);
+}, 'QQ 机器人连接参数已保存（渠道守护进程将自动重连生效）');
+
+$('testQqConfigBtn').onclick = () => runAction(async () => {
+  const res = await api('/api/settings/channel-config/test', 'POST', collectQqFormPayload());
+  showToast(res.message || 'QQ 机器人凭据校验通过', 'ok');
+});
+
+function collectWecomFormPayload() {
+  return {
+    channel: 'wecom',
+    bot_id: $('wecomBotIdInput').value.trim(),
+    bot_secret: $('wecomBotSecretInput').value.trim(),
+    ws_url: $('wecomWsUrlInput').value.trim(),
+    allowed_publications: $('wecomAllowedPubsInput').value.trim(),
+    auto_execute_capabilities: $('wecomAutoExecInput').value.trim(),
+    workspace_id: $('wecomWorkspaceIdInput').value.trim(),
+    isolate_workspaces: $('wecomIsolateWsCheckbox').checked,
+    group_direct_on_callback: $('wecomGroupDirectCheckbox').checked,
+  };
+}
+
+$('saveWecomConfigBtn').onclick = () => runAction(async () => {
+  const res = await api('/api/settings/channel-config', 'PUT', collectWecomFormPayload());
+  $('wecomBotSecretInput').value = '';
+  renderRuntimeConfigSection(res);
+}, '企业微信连接参数已保存（渠道守护进程将自动平滑重连生效）');
+
+$('testWecomConfigBtn').onclick = () => runAction(async () => {
+  const res = await api('/api/settings/channel-config/test', 'POST', collectWecomFormPayload());
+  showToast(res.message || '企业微信网关连通性校验通过', 'ok');
+});
 
 async function pruneWorkspaceFilesNow() {
   const res = await api('/api/workspace-files/prune', 'POST', {});

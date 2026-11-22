@@ -442,6 +442,59 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(self.plane.get_execution("exec-2").status, "failed")
         self.assertEqual(self.plane.get_work_item("work-2").status, "failed")
 
+    def test_reconcile_interrupted_running_settles_orphaned_running_executions_and_restores_workspace(self) -> None:
+        self.plane.ingest_event(self.event("event-run-1"))
+        self.plane.ingest_event(self.event("event-run-2"))
+        self.plane.create_conversation(
+            conversation_id="conversation-run", kind="test",
+            participant_refs=["actor-1"], policy_version="policy-1",
+        )
+        manager = WorkspaceManager(Path(self.temp_dir.name) / "workspaces")
+        manager.provision("ws-run-1")
+        manager.provision("ws-run-2")
+
+        for suffix, ev_id, ws_id in (("r1", "event-run-1", "ws-run-1"), ("r2", "event-run-2", "ws-run-2")):
+            self.plane.create_work_item(
+                work_item_id=f"work-{suffix}", title=f"W{suffix}", objective="O",
+                source_event_ids=[ev_id], completion_conditions=["done"],
+                risk_class="low", owner_ref="actor-1",
+            )
+            self.plane.propose_work_item(f"work-{suffix}")
+            self.plane.accept_work_item(f"work-{suffix}")
+            self.plane.queue_work_item(f"work-{suffix}")
+            self.plane.create_plan(
+                plan_id=f"plan-{suffix}", work_item_id=f"work-{suffix}",
+                steps=[PlanStep(step_id=f"step-{suffix}", ordinal=1, title="Run", capability="dsh.task")],
+            )
+            self.plane.create_execution_request(
+                execution_id=f"exec-{suffix}", work_item_id=f"work-{suffix}",
+                plan_step_id=f"step-{suffix}", workspace_id=ws_id, capability="dsh.task", parameters={},
+            )
+            self.plane.start_execution(f"exec-{suffix}")
+            manager.mark_running(ws_id)
+            self.plane.save_assistant_run(AssistantRun(
+                event_id=ev_id, status="executing", conversation_id="conversation-run",
+                thread_id="thread-run", work_item_id=f"work-{suffix}", plan_id=f"plan-{suffix}",
+                workspace_id=ws_id, execution_ids=[f"exec-{suffix}"], policy_version="policy-1",
+            ))
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        with self.plane.store.transaction() as conn:
+            conn.execute("UPDATE executions SET updated_at = ?", (old_ts,))
+
+        with manager.execution_lease("ws-run-2"):
+            reconciled = self.plane.reconcile_abandoned_queued(manager, min_age_seconds=60.0)
+
+        self.assertEqual(reconciled, ["exec-r1"])
+        self.assertEqual(self.plane.get_execution("exec-r1").status, "failed")
+        self.assertEqual(self.plane.get_execution_result("exec-r1").metadata["error_category"], "interrupted")
+        self.assertEqual(self.plane.get_work_item("work-r1").status, "failed")
+        self.assertEqual(manager.get("ws-run-1").status, "ready")
+        run_r1 = self.plane.get_assistant_run("event-run-1")
+        self.assertEqual(run_r1.status, "execution_failed")
+        self.assertEqual(run_r1.error_category, "interrupted")
+        self.assertEqual(self.plane.get_execution("exec-r2").status, "running")
+
 
 if __name__ == "__main__":
     unittest.main()

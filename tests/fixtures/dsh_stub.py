@@ -50,6 +50,27 @@ def append_session_event(session_id: str, event: dict) -> None:
 
 session_id = session_arg or "fixture-session"
 emit({"type": "session", "sessionId": session_id, "cwd": os.getcwd()})
+if scenario == "primary-fails-fallback-succeeds":
+    patch_data = json.loads(Path(patch_arg).read_text(encoding="utf-8")) if patch_arg else []
+    model_id = next((e["config"]["model"] for e in patch_data if e.get("id") == "agent-default-model"), "")
+    if model_id != "backup-model":
+        sys.stderr.write("dsh: HTTP_502: upstream_unavailable on primary\n")
+        emit({"type": "final", "sessionId": session_id,
+              "reason": {"kind": "error", "error": {"code": "HTTP_502", "message": "upstream_unavailable on primary"}},
+              "text": ""})
+        raise SystemExit(1)
+if scenario == "upstream-404-error":
+    sys.stderr.write("dsh: HTTP_404: model_not_found test-secret-key\n")
+    emit({"type": "final", "sessionId": session_id,
+          "reason": {"kind": "error", "error": {"code": "HTTP_404", "message": "model_not_found test-secret-key"}},
+          "text": ""})
+    raise SystemExit(1)
+if scenario == "max-tokens-wrapup" and not session_arg:
+    Path("work/partial-evidence.txt").write_text("max-tokens partial summary", encoding="utf-8")
+    emit({"type": "tool_call", "callId": "call-mt-1", "tool": "bash", "input": {"command": "collect"}})
+    emit({"type": "tool_result", "callId": "call-mt-1", "status": "completed", "result": "ok"})
+    emit({"type": "final", "sessionId": session_id, "reason": {"kind": "max-tokens"}, "text": "truncated text..."})
+    raise SystemExit(1)
 if scenario == "idle-hang-early":
     emit({"type": "status", "phase": "step_start", "turn": 1, "step": 1})
     time.sleep(10)
