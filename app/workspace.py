@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from collections import deque
+import itertools
 import json
 import os
 import platform
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .execution_state import WorkspaceLease
+from .execution_state import ExecutionBusy, WorkspaceLease
 
 
 WORKSPACE_DIRECTORIES = ("work", "tools", "artifacts", "logs", "state", "cache")
@@ -55,6 +59,74 @@ class Workspace:
         return self.root / name
 
 
+class _QueuedWorkspaceLease:
+    """Serialize in-process waiters in FIFO order before acquiring the OS workspace flock."""
+
+    def __init__(self, manager: "WorkspaceManager", workspace_id: str, lock_path: Path, *, wait_seconds: float) -> None:
+        self._manager = manager
+        self._workspace_id = workspace_id
+        self._lock_path = lock_path
+        self._wait_seconds = max(0.0, float(wait_seconds))
+        self._ticket: int | None = None
+        self._lease: WorkspaceLease | None = None
+
+    def __enter__(self) -> "_QueuedWorkspaceLease":
+        deadline = time.monotonic() + self._wait_seconds if self._wait_seconds > 0 else 0.0
+        with self._manager._lease_condition:
+            queue = self._manager._lease_queues.setdefault(self._workspace_id, deque())
+            if self._wait_seconds <= 0 and queue:
+                raise ExecutionBusy("workspace already has a live execution")
+            ticket = next(self._manager._next_ticket)
+            queue.append(ticket)
+            self._ticket = ticket
+            while queue[0] != ticket:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._remove_ticket_locked(ticket)
+                    self._ticket = None
+                    raise ExecutionBusy("workspace already has a live execution")
+                self._manager._lease_condition.wait(timeout=remaining)
+        remaining = max(0.0, deadline - time.monotonic()) if self._wait_seconds > 0 else 0.0
+        lease = WorkspaceLease(self._lock_path, wait_seconds=remaining)
+        try:
+            lease.__enter__()
+        except Exception:
+            with self._manager._lease_condition:
+                self._remove_ticket_locked(ticket)
+                self._ticket = None
+            raise
+        self._lease = lease
+        return self
+
+    def fileno(self) -> int:
+        if self._lease is None:
+            raise ValueError("workspace lease is not held")
+        return self._lease.fileno()
+
+    def _remove_ticket_locked(self, ticket: int) -> None:
+        queue = self._manager._lease_queues.get(self._workspace_id)
+        if queue is None:
+            return
+        try:
+            queue.remove(ticket)
+        except ValueError:
+            pass
+        if not queue:
+            self._manager._lease_queues.pop(self._workspace_id, None)
+        self._manager._lease_condition.notify_all()
+
+    def __exit__(self, *exception: object) -> None:
+        try:
+            if self._lease is not None:
+                self._lease.__exit__(*exception)
+                self._lease = None
+        finally:
+            if self._ticket is not None:
+                with self._manager._lease_condition:
+                    self._remove_ticket_locked(self._ticket)
+                    self._ticket = None
+
+
 class WorkspaceManager:
     """Own the lifecycle and filesystem boundary of Agent Workspaces."""
 
@@ -62,6 +134,10 @@ class WorkspaceManager:
         self.base_directory = Path(base_directory).expanduser().resolve()
         self.base_directory.mkdir(parents=True, exist_ok=True)
         self._secure_directory(self.base_directory)
+        self._lease_lock = threading.Lock()
+        self._lease_condition = threading.Condition(self._lease_lock)
+        self._lease_queues: dict[str, deque[int]] = {}
+        self._next_ticket = itertools.count(1)
 
     def provision(self, workspace_id: str, *, tier: str | None = None) -> Workspace:
         if tier is not None and tier not in WORKSPACE_TIERS:
@@ -100,9 +176,14 @@ class WorkspaceManager:
         with self.execution_lease(workspace_id):
             return self._restore(workspace_id)
 
-    def execution_lease(self, workspace_id: str) -> WorkspaceLease:
+    def execution_lease(self, workspace_id: str, *, wait_seconds: float = 0.0) -> _QueuedWorkspaceLease:
         self._validate_workspace_id(workspace_id)
-        return WorkspaceLease(self.base_directory / ".locks" / f"{workspace_id}.lock")
+        return _QueuedWorkspaceLease(
+            self,
+            workspace_id,
+            self.base_directory / ".locks" / f"{workspace_id}.lock",
+            wait_seconds=wait_seconds,
+        )
 
     def _restore(self, workspace_id: str) -> Workspace:
         workspace = self._load(workspace_id)

@@ -446,12 +446,12 @@ class DshAdapter:
             execution_contract += (
                 " The final expected artifact must contain exactly one final answer block bounded by these exact "
                 f"markers: {begin} and {end}. Only the text inside that block is eligible for delivery to the user. "
-                f"If producing downloadable files to upload to QQ (such as generated .xlsx reports), declare their workspace-relative paths inside {fbegin} and {fend}."
+                f"If producing downloadable files to send back to the IM chat (such as generated .xlsx reports), declare their workspace-relative paths inside {fbegin} and {fend}."
             )
         else:
             execution_contract += (
                 " This is an intermediate milestone stage; record structured findings concisely in the expected artifact "
-                "without writing a QQ user final-reply marker block."
+                "without writing a user final-reply marker block."
             )
         return execution_contract
 

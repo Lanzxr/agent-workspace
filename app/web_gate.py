@@ -54,8 +54,8 @@ class WebGateSettings:
         if not 1 <= search_timeout <= 60:
             raise ValueError("COMPANY_AGENT_WEB_SEARCH_TIMEOUT_SECONDS must be between 1 and 60")
         owner = (values.get("COMPANY_AGENT_WEB_GATE_OWNER") or "admin").strip()
-        if owner not in {"admin", "qq"}:
-            raise ValueError("COMPANY_AGENT_WEB_GATE_OWNER must be admin or qq")
+        if owner not in {"admin", "qq", "wecom"}:
+            raise ValueError("COMPANY_AGENT_WEB_GATE_OWNER must be admin, qq, or wecom")
         return cls(host, port, api_key, search_url, search_timeout, owner)
 
 

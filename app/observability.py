@@ -6,6 +6,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any
 
+from .models import is_direct_source, is_group_source, source_identity_scope, source_provider
 from .store import Store
 
 
@@ -136,8 +137,9 @@ def _resolve_actor_meta(ctx: dict[str, Any], *, actor_id: str, external_actor_id
             ext = parts[4]
     if ext:
         bindings = ctx["bindings"]
-        scope = source_id if source_type == "qq.group" else "*"
-        uid = bindings.get((scope, ext, "qq")) or bindings.get(("*", ext, "qq"))
+        provider = source_provider(source_type) or "qq"
+        scope = source_identity_scope(source_type, source_id)
+        uid = bindings.get((scope, ext, provider)) or bindings.get(("*", ext, provider))
         if uid and uid in users:
             info = users[uid]
             return info["display_name"], info["role"]
@@ -147,7 +149,7 @@ def _resolve_actor_meta(ctx: dict[str, Any], *, actor_id: str, external_actor_id
 
 def _resolve_scene_meta(ctx: dict[str, Any], *, source_type: str, source_id: str,
                         actor_role: str) -> dict[str, str]:
-    if source_type in {"qq.group", "qq.guild"}:
+    if is_group_source(source_type):
         grp = ctx["groups"].get(f"{source_type}:{source_id}", {})
         tier = grp.get("tier") or "client_group"
         compat = grp.get("downward_compat") or "inherit"
@@ -159,7 +161,7 @@ def _resolve_scene_meta(ctx: dict[str, Any], *, source_type: str, source_id: str
             "downward_compat": compat,
             "tier_label": tier_label,
         }
-    if source_type in {"qq.c2c", "qq.direct", "qq.private"}:
+    if is_direct_source(source_type):
         if actor_role == "admin":
             tier_label, tier = "管理员私聊 L3", "admin"
         elif actor_role == "employee":
@@ -369,12 +371,14 @@ def trace_for_event(store: Store, event_id: str, *, _ctx: dict[str, Any] | None 
 
 
 def _conversation_label(source_type: str, source_id: str, *, group_name: str = "", actor_name: str = "") -> str:
-    if source_type == "qq.group":
-        return group_name or f"QQ 群 · {source_id[:12]}"
-    if source_type == "qq.c2c":
+    if is_group_source(source_type):
+        prefix = "企微群" if source_type.startswith("wecom.") else "QQ 群"
+        return group_name or f"{prefix} · {source_id[:12]}"
+    if is_direct_source(source_type):
+        prefix = "企微私聊" if source_type.startswith("wecom.") else "QQ 私聊"
         if actor_name and not actor_name.startswith("未绑定"):
-            return f"QQ 私聊 · {actor_name}"
-        return f"QQ 私聊 · {source_id[:12]}"
+            return f"{prefix} · {actor_name}"
+        return f"{prefix} · {source_id[:12]}"
     return group_name or source_type or source_id or "未命名会话"
 
 
@@ -406,7 +410,7 @@ def list_conversations(store: Store, *, limit: int = 50) -> list[dict[str, Any]]
             "last_activity_at": trace["occurred_at"],
             "messages": [],
         })
-        if label and not group["label"].endswith(label) and not trace["actor_display_name"].startswith("未绑定") and trace["source_type"] == "qq.c2c":
+        if label and not group["label"].endswith(label) and not trace["actor_display_name"].startswith("未绑定") and is_direct_source(trace["source_type"]):
             group["label"] = label
         if trace["workspace_id"] and not group["workspace_id"]:
             group["workspace_id"] = trace["workspace_id"]

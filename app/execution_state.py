@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import BinaryIO
 
@@ -45,9 +46,25 @@ def write_private_json(path: Path, value: object) -> None:
 
 
 class WorkspaceLease:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, wait_seconds: float = 0.0, poll_interval: float = 0.2) -> None:
         self.path = path
+        self.wait_seconds = max(0.0, float(wait_seconds))
+        self.poll_interval = max(0.01, min(1.0, float(poll_interval)))
         self.stream: BinaryIO | None = None
+
+    @staticmethod
+    def _try_acquire(descriptor: int, stream: BinaryIO, path: Path) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            if path.stat().st_size == 0:
+                stream.write(b"0")
+            stream.seek(0)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def __enter__(self) -> "WorkspaceLease":
         private_directory(self.path.parent)
@@ -55,23 +72,20 @@ class WorkspaceLease:
             raise ValueError("workspace lease must not be a symbolic link")
         descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
         self.stream = os.fdopen(descriptor, "r+b", buffering=0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                if self.path.stat().st_size == 0:
-                    self.stream.write(b"0")
-                self.stream.seek(0)
-                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as error:
-            self.stream.close()
-            self.stream = None
-            raise ExecutionBusy("workspace already has a live execution") from error
-        return self
+        deadline = time.monotonic() + self.wait_seconds if self.wait_seconds > 0 else 0.0
+        while True:
+            try:
+                self._try_acquire(descriptor, self.stream, self.path)
+                return self
+            except OSError as error:
+                if self.wait_seconds > 0:
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(min(self.poll_interval, remaining))
+                        continue
+                self.stream.close()
+                self.stream = None
+                raise ExecutionBusy("workspace already has a live execution") from error
 
     def fileno(self) -> int:
         if self.stream is None:

@@ -215,7 +215,7 @@
       <div id="bindCodeBox" class="bind-box">
         <div>
           <strong id="bindCodeTitle">已生成一次性绑定码</strong>
-          <div class="small">让本人在 QQ 私聊或群聊中直接发送：<code id="bindCodeCommand"></code>（24 小时内单次有效）</div>
+          <div class="small">让本人在 QQ 或企业微信私聊/群聊中直接发送：<code id="bindCodeCommand"></code>（24 小时内单次有效）</div>
         </div>
         <button class="sm primary" id="copyBindCodeBtn">复制命令</button>
       </div>
@@ -223,18 +223,21 @@
     </div>
 
     <div class="card">
-      <h3 style="margin-top:0">近期活跃的 QQ 外部发送者（快捷认领）</h3>
-      <p class="hint" style="margin:0 0 6px">无需翻日志查找 OpenID：点击「填入绑定表」即可直接关联到企业成员。</p>
+      <h3 style="margin-top:0">近期活跃外部发送者（快捷认领：QQ / 企业微信）</h3>
+      <p class="hint" style="margin:0 0 6px">无需翻日志查找 OpenID / UserID：点击「填入绑定表」即可自动带入平台与账号并关联到企业成员。</p>
       <div id="seenActorsTable"></div>
     </div>
 
     <div class="card">
       <h3 style="margin-top:0">平台身份手动绑定与管理</h3>
       <div class="form">
-        <input id="provider" value="qq" placeholder="平台 (qq)" style="max-width:90px">
-        <input id="account" placeholder="机器人 AppID">
-        <input id="scope" value="*" placeholder="范围（全局建议 *，或填群 OpenID）">
-        <input id="external" placeholder="外部用户 OpenID">
+        <select id="provider" style="max-width:110px">
+          <option value="qq">QQ (qq)</option>
+          <option value="wecom">企业微信 (wecom)</option>
+        </select>
+        <input id="account" placeholder="机器人 AppID / BotID">
+        <input id="scope" value="*" placeholder="范围（全局建议 *，或填群 ID）">
+        <input id="external" placeholder="外部用户 OpenID / UserID">
         <select id="userId"></select>
         <button class="primary" id="bindUserBtn">确认绑定</button>
       </div>
@@ -246,7 +249,7 @@
   <section id="groups">
     <div class="card">
       <div class="bar" style="margin:0 0 6px;justify-content:space-between">
-        <h2 style="margin:0">QQ 群自动发现与层级隔离</h2>
+        <h2 style="margin:0">IM 群聊自动发现与层级隔离（QQ / 企业微信）</h2>
         <span id="compatBanner" class="chip">向下兼容: -</span>
       </div>
       <p class="hint" style="margin:0 0 8px">新群首次收到消息会自动登记为 <code>L1 客户群</code>（与所有客户群及内部资料物理隔离）。已绑定的管理员可在群内直接发 <code>/mark-internal</code> / <code>/mark-client</code> / <code>/compat on|off|inherit</code>，或直接在此修改保存。</p>
@@ -440,7 +443,7 @@
         <select id="sourceEvent" style="min-width:200px"></select>
         <select id="workItem" style="min-width:180px"></select>
         <input id="resumePrompt" placeholder="到期后需要继续处理什么" style="flex:1;min-width:200px">
-        <input id="groupOpenid" placeholder="回调 QQ 群 OpenID（可选）">
+        <input id="groupOpenid" placeholder="回调群 OpenID / ChatID（可选）">
         <button class="primary" id="createScheduleBtn">创建任务</button>
       </div>
       <div id="scheduleTable"></div>
@@ -580,6 +583,7 @@ const state = {
   gaps: [],
   logs: [],
   qqAppId: '',
+  wecomBotId: '',
   toastTimer: null,
 };
 
@@ -674,7 +678,10 @@ function renderServices(s) {
   const active = s.active_dsh || [];
   const dshState = active.some(x => x.status === 'running') ? '执行中' : active.length ? `排队 (${active.length})` : '空闲';
   const dshDot = active.length ? 'warn' : 'ok';
-  const qqDot = s.qq_gateway === 'connected' ? 'ok' : (s.qq_gateway === 'offline' ? 'err' : 'warn');
+  const dotForGw = st => st === 'connected' ? 'ok' : (st === 'offline' ? 'err' : (st === 'disabled' ? '' : 'warn'));
+  const qqDot = dotForGw(s.qq_gateway);
+  const wecomGw = s.wecom_gateway || 'disabled';
+  const wecomDot = dotForGw(wecomGw);
   const k = s.knowledge_summary || {};
   const docsReady = k.configured ? (k.documents?.ready || 0) : 0;
   const kLabel = k.configured ? `已连接 (${docsReady} 篇就绪)` : '未配置';
@@ -683,6 +690,7 @@ function renderServices(s) {
   const dssLabel = dssStats.total ? `累计 ${dssStats.total} 轮` : '就绪';
   const pills = [
     ['QQ Gateway', s.qq_gateway, qqDot],
+    ['WeCom Gateway', wecomGw, wecomDot],
     ['Company Agent', `${s.service} (${s.release_id || 'source'})`, 'ok'],
     ['DSSuperAgent', dssLabel, 'ok'],
     ['DSH 沙箱执行器', dshState, dshDot],
@@ -752,7 +760,7 @@ function renderConversations() {
   const q = ($('convSearch').value || '').trim().toLowerCase();
   const filtered = state.conversations.filter(c => {
     if (state.convTierFilter !== 'all') {
-      if (state.convTierFilter === 'direct' && c.source_type !== 'qq.c2c') return false;
+      if (state.convTierFilter === 'direct' && !['qq.c2c', 'qq.dm', 'qq.direct', 'qq.private', 'wecom.dm', 'wecom.single'].includes(c.source_type)) return false;
       if (state.convTierFilter === 'internal' && !['internal', 'admin'].includes(c.group_tier)) return false;
       if (state.convTierFilter === 'client_group' && c.group_tier !== 'client_group') return false;
     }
@@ -763,7 +771,7 @@ function renderConversations() {
   if (!filtered.length) {
     list.innerHTML = '<div class="empty">暂无匹配的会话</div>';
     if (!state.conversations.length) {
-      $('chatHeader').innerHTML = '<div><strong>暂无会话</strong><small>收到 QQ 消息后会展示在这里</small></div>';
+      $('chatHeader').innerHTML = '<div><strong>暂无会话</strong><small>收到 QQ 或企业微信消息后会展示在这里</small></div>';
       $('chatMessages').innerHTML = '<div class="empty">暂无消息记录</div>';
     }
     return;
@@ -869,8 +877,11 @@ function roleLabelText(r) {
 
 function renderUsersSection(uData, bindings) {
   const users = uData.users || [];
-  if (uData.qq_app_id && !$('account').value.trim()) {
-    $('account').value = uData.qq_app_id;
+  const selectedProvider = $('provider').value || 'qq';
+  if (!$('account').value.trim()) {
+    if (selectedProvider === 'wecom' && uData.wecom_bot_id) $('account').value = uData.wecom_bot_id;
+    else if (uData.qq_app_id) $('account').value = uData.qq_app_id;
+    else if (uData.wecom_bot_id) { $('provider').value = 'wecom'; $('account').value = uData.wecom_bot_id; }
   }
   if (!$('userTable').contains(document.activeElement)) {
     if (!users.length) {
@@ -899,16 +910,21 @@ function renderUsersSection(uData, bindings) {
 
   const seen = uData.seen_external_actors || [];
   if (!seen.length) {
-    $('seenActorsTable').innerHTML = '<p class="muted">暂无最近活跃 QQ 发送者记录。</p>';
+    $('seenActorsTable').innerHTML = '<p class="muted">暂无最近活跃外部发送者记录。</p>';
   } else {
-    $('seenActorsTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>来源</th><th>外部 OpenID</th><th>作用域</th><th>当前关联账号</th><th>最近消息时间</th><th></th></tr></thead><tbody>${seen.map(a => `
+    const actorSceneLabel = a => {
+      if (a.source_type === 'wecom.group') return '企微群 ' + a.source_id.slice(0, 10);
+      if (a.source_type && a.source_type.startsWith('wecom.')) return '企微私聊';
+      return a.source_type === 'qq.group' ? 'QQ 群 ' + a.source_id.slice(0, 10) : 'QQ 私聊';
+    };
+    $('seenActorsTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>来源</th><th>外部 ID</th><th>作用域</th><th>当前关联账号</th><th>最近消息时间</th><th></th></tr></thead><tbody>${seen.map(a => `
       <tr>
-        <td>${esc(a.source_type === 'qq.group' ? 'QQ 群 ' + a.source_id.slice(0, 10) : 'QQ 私聊')}</td>
+        <td>${esc(actorSceneLabel(a))}</td>
         <td><code>${esc(a.external_id)}</code></td>
         <td><code>${esc(a.scope_id)}</code></td>
         <td>${a.resolved_user_id ? `<strong>${esc(a.resolved_name)}</strong> ${roleChip(a.resolved_role)}` : '<span class="chip">未绑定</span>'}</td>
         <td>${esc(fmtTime(a.last_seen_at))}</td>
-        <td><button class="sm" data-fill-account="${esc(a.account_id)}" data-fill-scope="*" data-fill-ext="${esc(a.external_id)}">填入绑定表</button></td>
+        <td><button class="sm" data-fill-provider="${esc(a.provider || 'qq')}" data-fill-account="${esc(a.account_id)}" data-fill-scope="*" data-fill-ext="${esc(a.external_id)}">填入绑定表</button></td>
       </tr>`).join('')}</tbody></table></div>`;
   }
 
@@ -929,10 +945,11 @@ function renderGroupsAndKnowledge(groups, kData, globalCompat) {
 
   if (!$('groupTable').contains(document.activeElement)) {
     if (!groups.length) {
-      $('groupTable').innerHTML = '<p class="muted">尚未发现 QQ 群，机器人收到群消息后会自动登记在这里。</p>';
+      $('groupTable').innerHTML = '<p class="muted">尚未发现群聊，QQ 或企业微信收到群消息后会自动登记在这里。</p>';
     } else {
-      $('groupTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>群显示名称</th><th>群 OpenID</th><th>群层级 (Tier)</th><th>向下兼容策略</th><th>备注</th><th>最近活跃</th><th></th></tr></thead><tbody>${groups.map(g => `
+      $('groupTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>平台</th><th>群显示名称</th><th>群 ID</th><th>群层级 (Tier)</th><th>向下兼容策略</th><th>备注</th><th>最近活跃</th><th></th></tr></thead><tbody>${groups.map(g => `
         <tr data-group-row="${esc(g.source_id)}">
+          <td><span class="chip">${esc(g.source_type && g.source_type.startsWith('wecom.') ? '企业微信' : 'QQ')}</span></td>
           <td><input class="g-name" value="${esc(g.display_name)}" placeholder="输入群备注名"></td>
           <td><code>${esc(g.source_id)}</code></td>
           <td>
@@ -950,7 +967,7 @@ function renderGroupsAndKnowledge(groups, kData, globalCompat) {
           </td>
           <td><input class="g-notes" value="${esc(g.notes || '')}" placeholder="备注（可选）"></td>
           <td><small>${esc(fmtTime(g.updated_at))}</small></td>
-          <td><button class="sm primary" data-save-group="${esc(g.source_id)}">保存</button></td>
+          <td><button class="sm primary" data-save-group="${esc(g.source_id)}" data-save-source-type="${esc(g.source_type || 'qq.group')}">保存</button></td>
         </tr>`).join('')}</tbody></table></div>`;
     }
   }
@@ -960,8 +977,8 @@ function renderGroupsAndKnowledge(groups, kData, globalCompat) {
   const presetOptions = [
     '<option value="">快捷选择目标位置…</option>',
     '<option value="internal::company">企业内部共享知识库 (internal:company)</option>',
-    ...groups.map(g => `<option value="group::${esc(g.source_id)}">${g.tier === 'internal' ? '[内部群]' : '[客户群]'} ${esc(g.display_name || g.source_id)}</option>`),
-    ...state.conversations.filter(c => c.source_type === 'qq.c2c').map(c =>
+    ...groups.map(g => `<option value="group::${esc(g.source_id)}">${g.tier === 'internal' ? '[内部群]' : '[客户群]'} (${g.source_type?.startsWith('wecom.') ? '企微' : 'QQ'}) ${esc(g.display_name || g.source_id)}</option>`),
+    ...state.conversations.filter(c => ['qq.c2c', 'qq.dm', 'qq.direct', 'qq.private', 'wecom.dm', 'wecom.single'].includes(c.source_type)).map(c =>
       `<option value="direct::${esc(c.conversation_id)}">[私聊] ${esc(c.label)}</option>`
     ),
   ];
@@ -1254,6 +1271,7 @@ async function refresh() {
     const s = await api('/api/status');
     state.status = s;
     state.qqAppId = s.qq_app_id || '';
+    state.wecomBotId = s.wecom_bot_id || '';
     $('status').textContent = '在线';
     $('connDot').className = 'dot ok';
     $('releaseBadge').textContent = `版本: ${s.release_id || 'source'}`;
@@ -1475,10 +1493,12 @@ $('userTable').addEventListener('click', async e => {
 $('seenActorsTable').addEventListener('click', e => {
   const btn = e.target.closest('button[data-fill-ext]');
   if (!btn) return;
-  $('account').value = btn.dataset.fillAccount || state.qqAppId || '';
+  const prov = btn.dataset.fillProvider || 'qq';
+  $('provider').value = prov;
+  $('account').value = btn.dataset.fillAccount || (prov === 'wecom' ? state.wecomBotId : state.qqAppId) || '';
   $('scope').value = btn.dataset.fillScope || '*';
   $('external').value = btn.dataset.fillExt || '';
-  showToast('已将 QQ 发送者填入下方绑定表单，请选择关联成员后点击确认绑定', 'info');
+  showToast('已将该外部发送者填入下方绑定表单，请选择关联成员后点击确认绑定', 'info');
 });
 
 $('bindUserBtn').onclick = () => runAction(async () => {
@@ -1503,8 +1523,9 @@ $('groupTable').addEventListener('click', e => {
   if (!btn) return;
   const row = btn.closest('tr');
   const sourceId = btn.dataset.saveGroup;
+  const sourceType = btn.dataset.saveSourceType || 'qq.group';
   runAction(() => api('/api/groups', 'PUT', {
-    source_type: 'qq.group',
+    source_type: sourceType,
     source_id: sourceId,
     display_name: row.querySelector('.g-name').value,
     tier: row.querySelector('.g-tier').value,
@@ -1726,13 +1747,19 @@ $('toolForgeCard').addEventListener('click', e => {
 
 $('createScheduleBtn').onclick = () => runAction(async () => {
   const group = $('groupOpenid').value.trim();
+  const matchedGroup = (state.groups || []).find(g => g.source_id === group);
+  const destination = !group
+    ? {}
+    : (matchedGroup && matchedGroup.source_type === 'wecom.group'
+      ? { channel: 'wecom', chat_type: '2', chatid: group }
+      : { channel: 'qq', group_openid: group });
   await api('/api/schedules', 'POST', {
     due_at: $('due').value,
     time_zone: $('zone').value,
     source_event_id: $('sourceEvent').value,
     work_item_id: $('workItem').value,
     resume_prompt: $('resumePrompt').value,
-    destination: group ? { channel: 'qq', group_openid: group } : {},
+    destination,
   });
   $('resumePrompt').value = '';
 }, '定时任务已创建');

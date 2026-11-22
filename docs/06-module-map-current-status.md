@@ -1,6 +1,6 @@
 # Company Agent 模块地图
 
-更新日期：2026-11-16。树形图按“外部依赖、运行环境、项目自身”分类；状态依据当前代码和验收记录。
+更新日期：2026-11-21。树形图按“外部依赖、运行环境、项目自身”分类；状态依据当前代码和验收记录。
 
 ## 项目全景
 
@@ -8,6 +8,7 @@
 Company Agent 项目
 ├─ A. 外部平台与上游组件（被连接/调用的一方）
 │  ├─ QQ 开放平台：提供群事件推送和消息发送 API
+│  ├─ 企业微信（WeCom）：提供智能机器人 WebSocket 长连接事件推送、回复与分片媒体 API
 │  ├─ DSSuperAgent：提供消息观察、判断和计划能力
 │  └─ DSH：提供任务执行能力
 │
@@ -23,7 +24,9 @@ Company Agent 项目
 │
 └─ C. Company Agent 自身模块（项目代码负责）
    ├─ 1. 渠道接入
-   │  └─ QQ Channel Adapter：平台消息 ↔ 标准事件/待发送消息
+   │  ├─ Channel Core：通用 IM 指令、权限分级、静默旁听与 Outbox 发布基类
+   │  ├─ QQ Channel Adapter：QQ 平台消息 ↔ 标准事件/待发送消息
+   │  └─ WeCom Channel Adapter：企业微信智能机器人 WSS 长连接、AES 媒体解密与分片交付
    ├─ 2. 事件与控制
    │  ├─ Event Envelope：统一事件格式
    │  └─ Control Plane：状态、权限、审批、审计、发布决定
@@ -52,7 +55,7 @@ Company Agent 项目
       └─ Admin API / Web：管理身份、定时任务、联网开关和运行状态
 ```
 
-**层级说明：** QQ、DSSuperAgent、DSH 是被连接的平台/组件；Windows、WSL2、Linux 是运行环境；树中 C 类才是 Company Agent 自己实现和维护的模块。WSL2 在 Windows 上提供 Linux 环境；Linux 主机部署时无需 WSL2。
+**层级说明：** QQ、企业微信、DSSuperAgent、DSH 是被连接的平台/组件；Windows、WSL2、Linux 是运行环境；树中 C 类才是 Company Agent 自己实现和维护的模块。WSL2 在 Windows 上提供 Linux 环境；Linux 主机部署时无需 WSL2。
 
 **Agent Workspace：** 不是 WSL、Linux 或另一台虚拟机。它是 Workspace Manager 在 Linux 文件系统里为任务管理的目录和执行空间，用于存放输入、脚本、依赖、日志和产物。当前有路径、超时和输出等限制；完整 CPU、内存和进程隔离待完善。
 
@@ -60,7 +63,8 @@ Company Agent 项目
 
 | 项目模块 | 状态 | 代码/证据 |
 |---|---|---|
-| QQ Channel Adapter | 已接入双模式语义分流、群聊文件交付与正式事件链路：私聊与 `@机器人` 直接执行；未 `@` 群消息经 DSS `/orchestrator/api/company-agent/classify` 判别为 `direct` / `ongoing_discussion`（默认 300s 冷却防抖）/ `chatter`（纯闲聊略过）；支持文本说明及 `file_type: 4` + `msg_type: 7` 直传群/私聊 `.xlsx`/文档文件（≤5MB 直传、>5MB 分片上传），实际权限放行视 Bot 主体联调验证。 | `app/qq_channel.py`、`app/dssuperagent.py`、`docs/07-step5-qq.md` |
+| Channel Core & QQ Adapter | 已抽象复用核心并接入双模式语义分流、群聊文件交付与正式事件链路：私聊与 `@机器人` 直接执行；未 `@` 群消息经 DSS `/orchestrator/api/company-agent/classify` 判别为 `direct` / `ongoing_discussion`（默认 300s 冷却防抖）/ `chatter`（纯闲聊略过）；支持文本说明及 `file_type: 4` + `msg_type: 7` 直传群/私聊 `.xlsx`/文档文件（≤5MB 直传、>5MB 分片上传），实际权限放行视 Bot 主体联调验证。 | `app/channel_core.py`、`app/qq_channel.py`、`app/dssuperagent.py`、`docs/07-step5-qq.md` |
+| WeCom Channel Adapter | 已实现官方 WebSocket 长连接网关（`wss://openws.work.weixin.qq.com`，`aibot_subscribe` + 30s `ping` + 指数退避重连 + `disconnected_event` 处理 + `enter_chat` 欢迎语）、全消息类型归一化（私聊/群聊、语音转写、图文混排、引用回复）、临时媒体 AES-256-CBC 32 字节 PKCS#7 解密与 `Content-Disposition` 还原（私钥仅存内存）、即时被动 ACK + `aibot_send_msg` 主动最终推送/3 步 0-based 分片上传（≤50MiB）；模拟 WebSocket 全链路单测已通过，待真实企微 Bot 凭据联调验收。 | `app/wecom_channel.py`、`app/channel_core.py`、`app/attachments.py`、`tests/test_wecom_channel.py` |
 | Knowledge Base | AnythingLLM 适配、内容哈希去重、群/私聊/管理员 3 层 RBAC、DSSuperAgent 短期检索授权、同 WorkItem 多步附件继承与 `work/inputs/<execution_id>/` 原件交付已实现（不再按步骤即删，受工作区 15 天留存策略统一管理）。 | `app/knowledge/`、`app/workspace_retention.py`、`docs/09-knowledge-base.md` |
 | Event Envelope | 模型和契约已实现；渠道校验/幂等待适配器落实。 | `app/models.py`、`contracts/event-envelope.md` |
 | Control Plane | SQLite 状态、审批、审计、发布和 Outbox 基础已实现。 | `app/control_plane.py`、`app/store.py` |

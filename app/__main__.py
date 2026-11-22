@@ -7,11 +7,13 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from .assistant_workflow import AssistantPolicy, DssuperAgentWorkflow
 from .attachments import AttachmentIngestor
 from .admin_api import serve as serve_admin
+from .channel_core import DEFAULT_AMBIENT_COOLDOWN_SECONDS, DEFAULT_BOT_ALIASES
 from .control_plane import ControlPlane, ControlPlaneError, NotFound
 from .dsh import DshAdapter
 from .dssuperagent import DssuperAgentAdapter, DssuperAgentError
@@ -24,8 +26,8 @@ from .knowledge.service import KnowledgeService
 from .mcp_registry import McpServerSpec, load_mcp_secrets, merge_mcp_servers, parse_mcp_servers_json
 from .models import Event, PlanStep
 from .ports import assert_port_available, resolve_port_settings
-from .qq_channel import DEFAULT_AMBIENT_COOLDOWN_SECONDS, DEFAULT_BOT_ALIASES, QQBotAPI, QQChannelService, QQGateway
-from .runtime_config import QQBotSettings, RuntimeConfig, parse_forge_mcp_settings
+from .qq_channel import QQBotAPI, QQChannelService, QQGateway
+from .runtime_config import QQBotSettings, RuntimeConfig, WeComBotSettings, parse_forge_mcp_settings
 from .scheduler import ScheduleService, SchedulerWorker
 from .scheduled_resume import ScheduledResumeHandler
 from .shared_tools import SharedToolsManager
@@ -37,6 +39,7 @@ from .tool_forge import (
     forge_mcp_secrets_map,
 )
 from .tool_forge_mcp import ToolForgeMcpServer
+from .wecom_channel import WeComBotAPI, WeComChannelService, WeComGateway
 from .workspace import WorkspaceError, WorkspaceManager
 from .workspace_retention import (DEFAULT_WORKSPACE_RETENTION_DAYS, get_retention_days,
                                   prune_expired_workspace_files)
@@ -59,8 +62,8 @@ def _start_web_gate(plane, config: Path, settings: WebGateSettings) -> WebGateSe
 
 def _configured_owner(config: Path, name: str, default: str) -> str:
     owner = RuntimeConfig._parse_env(config).get(name, default).strip().lower()
-    if owner not in {"admin", "qq"}:
-        raise ValueError(f"{name} must be admin or qq")
+    if owner not in {"admin", "qq", "wecom"}:
+        raise ValueError(f"{name} must be admin, qq, or wecom")
     return owner
 
 
@@ -92,6 +95,10 @@ def main() -> int:
     qq_serve.add_argument("--config", type=Path, default=Path.home() / ".config/company-agent/runtime.env")
     qq_serve.add_argument("--dssuperagent-url", default=None)
     qq_serve.add_argument("--decision-timeout", type=float, default=DEFAULT_DECISION_TIMEOUT_SECONDS)
+    wecom_serve = commands.add_parser("wecom-serve", help="Receive WeCom Intelligent Robot events via WebSocket")
+    wecom_serve.add_argument("--config", type=Path, default=Path.home() / ".config/company-agent/runtime.env")
+    wecom_serve.add_argument("--dssuperagent-url", default=None)
+    wecom_serve.add_argument("--decision-timeout", type=float, default=DEFAULT_DECISION_TIMEOUT_SECONDS)
     admin = commands.add_parser("admin-serve", help="Run the authenticated local control console")
     admin.add_argument("--host", default=None)
     admin.add_argument("--port", type=int, default=None)
@@ -124,33 +131,61 @@ def main() -> int:
             token = (os.environ.get("COMPANY_AGENT_ADMIN_TOKEN") or configured).strip()
             if len(token) < 24:
                 raise ValueError("set COMPANY_AGENT_ADMIN_TOKEN to a random value of at least 24 characters")
+            plane.reconcile_abandoned_queued(WorkspaceManager(data_directory / "workspaces"), min_age_seconds=60.0)
             scheduler_shared = SharedToolsManager(data_directory / "shared-tools")
             scheduler_shared.ensure_layers()
             _ensure_default_settings(plane)
-            settings = QQBotSettings.load(arguments.config)
             knowledge_service = _load_knowledge_service(plane, arguments.config, data_directory)
-            api = QQBotAPI(settings)
             scheduler_plane = ControlPlane.open(data_directory / "control.sqlite")
             scheduler_vault, scheduler_forge = _build_tool_forge(scheduler_plane, data_directory, scheduler_shared)
             ports = _resolved_ports(arguments.config)
             dss_url = arguments.dssuperagent_url or ports.dssuperagent_url
             admin_host = arguments.host or ports.admin_host
             admin_port = arguments.port if arguments.port is not None else ports.admin_port
-            workflow = _qq_workflow(scheduler_plane, data_directory, arguments.config,
-                                    dss_url, arguments.decision_timeout,
-                                    settings, knowledge_service, tool_forge=scheduler_forge)
-            channel = QQChannelService(
-                scheduler_plane,
-                workflow,
-                api,
-                settings,
-                knowledge_service=knowledge_service,
-                workspace_manager=getattr(workflow, "manager", None),
-                tool_forge=scheduler_forge,
-                forge_secrets_vault=scheduler_vault,
+            qq_settings = QQBotSettings.load(arguments.config) if QQBotSettings.is_configured(arguments.config) else None
+            wecom_settings = (
+                WeComBotSettings.load(arguments.config) if WeComBotSettings.is_configured(arguments.config) else None
             )
-            worker = SchedulerWorker(ScheduleService(scheduler_plane.store), ScheduledResumeHandler(channel))
-            channel.flush_outbox()
+            scheduled_channels: dict[str, Any] = {}
+            if qq_settings is not None:
+                qq_api = QQBotAPI(qq_settings)
+                qq_workflow = _channel_workflow(
+                    scheduler_plane, data_directory, arguments.config,
+                    dss_url, arguments.decision_timeout,
+                    qq_settings, knowledge_service, tool_forge=scheduler_forge,
+                )
+                qq_channel = QQChannelService(
+                    scheduler_plane,
+                    qq_workflow,
+                    qq_api,
+                    qq_settings,
+                    knowledge_service=knowledge_service,
+                    workspace_manager=getattr(qq_workflow, "manager", None),
+                    tool_forge=scheduler_forge,
+                    forge_secrets_vault=scheduler_vault,
+                )
+                qq_channel.flush_outbox()
+                scheduled_channels["qq"] = qq_channel
+            if wecom_settings is not None:
+                # Never open a competing WeCom WebSocket inside admin-serve;
+                # scheduled resume writes WeCom replies into Outbox for wecom-serve to deliver.
+                wecom_api = WeComBotAPI(wecom_settings)
+                wecom_workflow = _channel_workflow(
+                    scheduler_plane, data_directory, arguments.config,
+                    dss_url, arguments.decision_timeout,
+                    wecom_settings, knowledge_service, tool_forge=scheduler_forge,
+                )
+                scheduled_channels["wecom"] = WeComChannelService(
+                    scheduler_plane,
+                    wecom_workflow,
+                    wecom_api,
+                    wecom_settings,
+                    knowledge_service=knowledge_service,
+                    workspace_manager=getattr(wecom_workflow, "manager", None),
+                    tool_forge=scheduler_forge,
+                    forge_secrets_vault=scheduler_vault,
+                )
+            worker = SchedulerWorker(ScheduleService(scheduler_plane.store), ScheduledResumeHandler(scheduled_channels))
             gate_settings = WebGateSettings.load(arguments.config)
             if gate_settings.owner == "admin":
                 active_web_gate = _start_web_gate(plane, arguments.config, gate_settings)
@@ -161,7 +196,9 @@ def main() -> int:
                 active_forge_mcp = _start_forge_mcp(plane, arguments.config, data_directory, scheduler_shared)
             mcp_servers, mcp_secrets = _load_runtime_mcp(arguments.config, data_directory)
             serve_admin(plane, data_directory, admin_host, admin_port, token, worker,
-                        knowledge_service=knowledge_service, qq_app_id=settings.app_id,
+                        knowledge_service=knowledge_service,
+                        qq_app_id=qq_settings.app_id if qq_settings is not None else None,
+                        wecom_bot_id=wecom_settings.bot_id if wecom_settings is not None else None,
                         mcp_runtime_servers=mcp_servers, mcp_secrets=mcp_secrets,
                         tool_forge=admin_forge, forge_secrets_vault=admin_vault)
             return 0
@@ -223,6 +260,65 @@ def main() -> int:
                                       on_attachments=service.process_prepared_attachments,
                                       on_status=lambda state: plane.set_runtime_status(
                                           "qq_gateway", {"state": state, "updated_at": plane.now()})).run_forever())
+            finally:
+                service.close()
+                outbox_stop.set()
+                outbox_thread.join(timeout=2)
+            return 0
+        if arguments.command == "wecom-serve":
+            wecom_shared = SharedToolsManager(data_directory / "shared-tools")
+            wecom_shared.ensure_layers()
+            _ensure_default_settings(plane)
+            settings = WeComBotSettings.load(arguments.config)
+            knowledge_service = _load_knowledge_service(plane, arguments.config, data_directory)
+            api = WeComBotAPI(settings)
+            wecom_vault, wecom_forge = _build_tool_forge(plane, data_directory, wecom_shared)
+            ports = _resolved_ports(arguments.config)
+            dss_url = arguments.dssuperagent_url or ports.dssuperagent_url
+            workflow = _channel_workflow(
+                plane, data_directory, arguments.config, dss_url,
+                arguments.decision_timeout, settings, knowledge_service,
+                tool_forge=wecom_forge,
+            )
+            service = WeComChannelService(
+                plane,
+                workflow,
+                api,
+                settings,
+                knowledge_service=knowledge_service,
+                workspace_manager=getattr(workflow, "manager", None),
+                attachment_ingestor=AttachmentIngestor(
+                    plane.store, knowledge_service=knowledge_service,
+                    storage_directory=data_directory / "attachments",
+                ),
+                tool_forge=wecom_forge,
+                forge_secrets_vault=wecom_vault,
+            )
+            outbox_stop = threading.Event()
+            outbox_thread = threading.Thread(
+                target=_run_outbox_retry,
+                args=(service, outbox_stop, plane, getattr(workflow, "manager", None), 5.0),
+                name="company-agent-wecom-outbox",
+                daemon=True,
+            )
+            outbox_thread.start()
+            threading.Thread(target=service.resume_pending_attachments, name="company-agent-wecom-attachment-recovery",
+                             daemon=True).start()
+            gate_settings = WebGateSettings.load(arguments.config)
+            if gate_settings.owner == "wecom":
+                active_web_gate = _start_web_gate(plane, arguments.config, gate_settings)
+            if _configured_owner(arguments.config, "COMPANY_AGENT_KNOWLEDGE_API_OWNER", "qq") == "wecom" and knowledge_service:
+                active_query_server = _start_knowledge_server(knowledge_service)
+            if _configured_owner(arguments.config, "COMPANY_AGENT_FORGE_MCP_OWNER", "admin") == "wecom":
+                active_forge_mcp = _start_forge_mcp(plane, arguments.config, data_directory, wecom_shared)
+            try:
+                asyncio.run(WeComGateway(
+                    api,
+                    service,
+                    on_status=lambda state: plane.set_runtime_status(
+                        "wecom_gateway", {"state": state, "updated_at": plane.now()}
+                    ),
+                ).run_forever())
             finally:
                 service.close()
                 outbox_stop.set()
@@ -437,10 +533,10 @@ def _effective_mcp_servers(plane: ControlPlane, runtime_servers: tuple[McpServer
     return merge_mcp_servers(runtime_servers, raw_console if isinstance(raw_console, list) else [])
 
 
-def _qq_workflow(plane: ControlPlane, data_directory: Path, config_path: Path, dssuperagent_url: str,
-                 decision_timeout: float, qq_settings: QQBotSettings,
-                 knowledge_service: KnowledgeService | None,
-                 *, tool_forge: ToolForgeService | None = None) -> DssuperAgentWorkflow:
+def _channel_workflow(plane: ControlPlane, data_directory: Path, config_path: Path, dssuperagent_url: str,
+                      decision_timeout: float, channel_settings: Any,
+                      knowledge_service: KnowledgeService | None,
+                      *, tool_forge: ToolForgeService | None = None) -> DssuperAgentWorkflow:
     manager = None
     dispatcher = None
     shared_tools = SharedToolsManager(data_directory / "shared-tools")
@@ -449,11 +545,12 @@ def _qq_workflow(plane: ControlPlane, data_directory: Path, config_path: Path, d
     mcp_provider = lambda: _effective_mcp_servers(plane, runtime_mcp_servers)
     mcp_secrets_provider = lambda: _load_runtime_mcp(config_path, data_directory)[1]
     # Keep the execution path available whenever knowledge-backed work can be
-    # delivered later, even when QQ auto-execution remains disabled. Manual
+    # delivered later, even when auto-execution remains disabled. Manual
     # approval must not depend on the startup allowlist.
-    if qq_settings.auto_execute_capabilities or knowledge_service is not None:
+    if channel_settings.auto_execute_capabilities or knowledge_service is not None:
         runtime = RuntimeConfig.load(config_path)
         manager = WorkspaceManager(data_directory / "workspaces")
+        plane.reconcile_abandoned_queued(manager, min_age_seconds=60.0)
         adapter = DshAdapter(
             runtime, manager, data_directory / "runtime",
             web_search_enabled=lambda: bool(plane.get_setting("web_search_enabled", runtime.web_search_enabled)),
@@ -463,7 +560,7 @@ def _qq_workflow(plane: ControlPlane, data_directory: Path, config_path: Path, d
         dispatcher = ExecutionDispatcher(
             plane, manager, adapter, data_directory / "runtime", knowledge_service=knowledge_service,
         )
-    policy = AssistantPolicy(auto_execute_capabilities=qq_settings.auto_execute_capabilities)
+    policy = AssistantPolicy(auto_execute_capabilities=channel_settings.auto_execute_capabilities)
     return DssuperAgentWorkflow(
         plane, DssuperAgentAdapter(dssuperagent_url), manager=manager, dispatcher=dispatcher,
         knowledge_service=knowledge_service, shared_tools=shared_tools,
@@ -473,7 +570,17 @@ def _qq_workflow(plane: ControlPlane, data_directory: Path, config_path: Path, d
     )
 
 
-def _run_outbox_retry(service: QQChannelService, stop: threading.Event,
+def _qq_workflow(plane: ControlPlane, data_directory: Path, config_path: Path, dssuperagent_url: str,
+                 decision_timeout: float, qq_settings: QQBotSettings,
+                 knowledge_service: KnowledgeService | None,
+                 *, tool_forge: ToolForgeService | None = None) -> DssuperAgentWorkflow:
+    return _channel_workflow(
+        plane, data_directory, config_path, dssuperagent_url, decision_timeout,
+        qq_settings, knowledge_service, tool_forge=tool_forge,
+    )
+
+
+def _run_outbox_retry(service: Any, stop: threading.Event,
                       plane: ControlPlane | None = None,
                       manager: WorkspaceManager | None = None,
                       interval_seconds: float = 15.0,

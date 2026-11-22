@@ -66,14 +66,15 @@ if role == "superagent":
             "--no-open",
         ],
     )
-if role not in {"admin", "qq"}:
-    raise SystemExit("role must be admin, qq, or superagent")
+if role not in {"admin", "qq", "wecom"}:
+    raise SystemExit("role must be admin, qq, wecom, or superagent")
 args = [sys.executable, "-m", "app", "--data-dir", str(data_dir)]
-args += (
-    ["admin-serve", "--host", ports.admin_host, "--port", str(ports.admin_port), "--dssuperagent-url", ports.dssuperagent_url]
-    if role == "admin"
-    else ["qq-serve", "--dssuperagent-url", ports.dssuperagent_url]
-)
+if role == "admin":
+    args += ["admin-serve", "--host", ports.admin_host, "--port", str(ports.admin_port), "--dssuperagent-url", ports.dssuperagent_url]
+elif role == "qq":
+    args += ["qq-serve", "--dssuperagent-url", ports.dssuperagent_url]
+else:
+    args += ["wecom-serve", "--dssuperagent-url", ports.dssuperagent_url]
 args += ["--config", str(config)]
 os.environ["PYTHONPATH"] = str(release / "company")
 os.chdir(release)

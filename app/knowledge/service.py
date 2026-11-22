@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ..identity import IdentityRegistry
-from ..models import Event
+from ..models import Event, is_direct_source, is_group_source
 from ..store import Store
 from .config import KnowledgeSettings
 from .file_types import TEXT_EXTENSIONS, detect_file
@@ -624,19 +624,19 @@ class KnowledgeService:
             return self.ingest_file(synthetic_event, 1, note_path, f"{cleaned_title}.md")
 
     def scope_for_event(self, event: Event) -> tuple[str, str]:
-        if event.source_type in {"qq.group", "qq.guild"}:
+        if is_group_source(event.source_type):
             group = self.identities.get_group(event.source_type, event.source_id)
             if group is not None and group.tier == "internal":
                 return "internal", "company"
             return "group", event.source_id
-        if event.source_type in {"qq.direct", "qq.private", "qq.c2c"}:
+        if is_direct_source(event.source_type):
             role = self.identities.user_role(event.actor_id, self.settings.admin_user_ids)
             if role in {"admin", "employee"} and _is_internal_ingest_message(event.content):
                 return "internal", "company"
             return "direct", event.conversation_id
         if event.source_type in {"internal", "admin", "console", "manual"}:
             return "internal", "company"
-        raise ValueError("knowledge scope is only defined for QQ group and direct conversations")
+        raise ValueError("knowledge scope is only defined for IM group and direct conversations")
 
     def _access_policy_for_event(self, event: Event) -> dict[str, Any]:
         scope_type, scope_id = self.scope_for_event(event)
@@ -654,7 +654,7 @@ class KnowledgeService:
         role = self.identities.user_role(actor_id, self.settings.admin_user_ids)
         global_compat = self.is_downward_compat_enabled()
         own_scopes: set[tuple[str, str]] = {(scope_type, scope_id)}
-        if source_type in {"qq.group", "qq.guild"}:
+        if is_group_source(source_type):
             group = self.identities.get_group(source_type, source_id)
             if group is not None and group.tier == "internal":
                 own_scopes.add(("internal", "company"))
@@ -683,7 +683,7 @@ class KnowledgeService:
                 "downward_compat": False,
                 "own_scopes": {("group", source_id)},
             }
-        if source_type in {"qq.direct", "qq.private", "qq.c2c"}:
+        if is_direct_source(source_type):
             if conversation_id:
                 own_scopes.add(("direct", conversation_id))
             if role == "admin":

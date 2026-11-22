@@ -303,3 +303,32 @@ class AuditEntry:
         audit_id, entity_type, entity_id, action, payload, created_at = row
         return cls(audit_id, entity_type, entity_id, action, payload, created_at)
 
+
+GROUP_SOURCE_TYPES = frozenset({"qq.group", "qq.guild", "wecom.group"})
+DIRECT_SOURCE_TYPES = frozenset({"qq.direct", "qq.private", "qq.c2c", "wecom.dm", "wecom.single"})
+IM_SOURCE_TYPES = GROUP_SOURCE_TYPES | DIRECT_SOURCE_TYPES
+
+
+def is_group_source(source_type: str) -> bool:
+    return source_type in GROUP_SOURCE_TYPES
+
+
+def is_direct_source(source_type: str) -> bool:
+    return source_type in DIRECT_SOURCE_TYPES
+
+
+def is_im_source(source_type: str) -> bool:
+    return source_type in IM_SOURCE_TYPES
+
+
+def source_provider(source_type: str) -> str:
+    if source_type.startswith("qq."):
+        return "qq"
+    if source_type.startswith("wecom."):
+        return "wecom"
+    return ""
+
+
+def source_identity_scope(source_type: str, source_id: str) -> str:
+    return source_id if source_type in {"qq.group", "wecom.group"} else "*"
+
