@@ -44,7 +44,7 @@ WORK_ITEM_TRANSITIONS: dict[str, set[str]] = {
     "proposed": {"accepted", "rejected", "needs_approval"},
     "needs_approval": {"accepted", "rejected", "cancelled"},
     "accepted": {"queued", "blocked", "cancelled"},
-    "queued": {"running", "blocked", "cancelled"},
+    "queued": {"running", "failed", "blocked", "cancelled"},
     "running": {"completed", "failed", "blocked", "cancelled"},
     "blocked": {"accepted", "queued", "cancelled"},
     "failed": {"accepted", "queued", "cancelled"},
@@ -606,6 +606,67 @@ class ControlPlane:
             connection.execute("BEGIN IMMEDIATE")
             return self._record_execution_result(connection, result)
 
+    def fail_queued_execution(
+        self,
+        execution_id: str,
+        *,
+        error: str,
+        error_category: str = "execution_failed",
+        result_status: str = "failed",
+    ) -> ExecutionRequest | None:
+        """Settle a queued execution that failed before DSH launch so it never stays queued forever."""
+        if result_status not in {"failed", "timed_out", "cancelled"}:
+            raise ValueError(f"unsupported execution result: {result_status}")
+        with self.store.transaction() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                request = self.get_execution(execution_id)
+            except NotFound:
+                return None
+            if request.status != "queued":
+                return request
+            now = self.now()
+            request.status = result_status
+            request.updated_at = now
+            plan = self._find_plan_for_work_item(request.work_item_id)
+            step = next(step for step in plan.steps if step.step_id == request.plan_step_id)
+            step.status = "failed"
+            plan.updated_at = now
+            item = self.get_work_item(request.work_item_id)
+            if item.status in {"queued", "running"}:
+                item.status = "failed"
+                item.updated_at = now
+            result = ExecutionResult(
+                execution_id=execution_id,
+                status=result_status,
+                error=error[:1000],
+                metadata={
+                    "workspace_id": request.workspace_id,
+                    "error_category": error_category,
+                    "finished_at": now,
+                    "pre_start": True,
+                },
+            )
+            connection.execute(
+                "UPDATE executions SET payload = ?, status = ?, updated_at = ? WHERE execution_id = ?",
+                (self.store.encode(request.to_dict()), request.status, now, execution_id),
+            )
+            connection.execute(
+                "INSERT OR REPLACE INTO execution_results(execution_id, payload, created_at) VALUES (?, ?, ?)",
+                (execution_id, self.store.encode(result.to_dict()), now),
+            )
+            self._save_plan(connection, plan)
+            self._save_work_item(connection, item)
+            self._audit(
+                connection,
+                "execution",
+                execution_id,
+                f"result:{result_status}",
+                {"error_category": error_category, "pre_start": True},
+                now,
+            )
+            return request
+
     def _record_execution_result(self, connection: sqlite3.Connection, result: ExecutionResult) -> ExecutionRequest:
         request = self.get_execution(result.execution_id)
         if request.status != "running":
@@ -843,6 +904,67 @@ class ControlPlane:
                 self._save_plan(connection, plan)
                 self._save_work_item(connection, item)
                 self._audit(connection, "execution", request.execution_id, "recovered", {}, now)
+
+        # Any queued execution whose owning assistant_run already terminated can never start.
+        terminal_runs = {"failed", "completed", "observed", "filtered", "execution_failed"}
+        queued_rows = self.store.connection.execute(
+            "SELECT execution_id, work_item_id, payload FROM executions WHERE status = 'queued'"
+        ).fetchall()
+        for row in queued_rows:
+            run_row = self.store.connection.execute(
+                "SELECT event_id, status, payload FROM assistant_runs WHERE payload LIKE ?",
+                (f'%"{row[1]}"%',),
+            ).fetchone()
+            if run_row is None:
+                continue
+            if str(run_row[1]) in terminal_runs:
+                self.fail_queued_execution(
+                    str(row[0]),
+                    error="Execution remained queued after assistant run finished",
+                    error_category="orphaned_queue",
+                )
+
+    def reconcile_abandoned_queued(self, manager: Any, *, min_age_seconds: float = 60.0) -> list[str]:
+        """Mark stale queued executions as failed when no process holds their workspace lease."""
+        from .execution_state import ExecutionBusy
+
+        reconciled: list[str] = []
+        now_dt = datetime.now(timezone.utc)
+        rows = self.store.connection.execute(
+            "SELECT execution_id, work_item_id, updated_at, payload FROM executions WHERE status = 'queued'"
+        ).fetchall()
+        for row in rows:
+            execution_id = str(row[0])
+            work_item_id = str(row[1])
+            try:
+                updated_dt = datetime.fromisoformat(str(row[2]))
+            except ValueError:
+                continue
+            if (now_dt - updated_dt).total_seconds() < min_age_seconds:
+                continue
+            request = ExecutionRequest.from_dict(self.store.decode(row[3]))
+            try:
+                with manager.execution_lease(request.workspace_id, wait_seconds=0.0):
+                    settled = self.fail_queued_execution(
+                        execution_id,
+                        error="Execution remained queued without an active workspace executor",
+                        error_category="abandoned_queue",
+                    )
+            except (ExecutionBusy, OSError, ValueError):
+                continue
+            if settled is None:
+                continue
+            reconciled.append(execution_id)
+            try:
+                run = self.get_assistant_run_for_work_item(work_item_id)
+            except NotFound:
+                continue
+            if run.status in {"executing", "authorizing"}:
+                run.status = "failed"
+                run.error_category = "abandoned_queue"
+                run.error = "Execution remained queued without an active workspace executor"
+                self.save_assistant_run(run)
+        return reconciled
 
     def list_audit(self, *, entity_type: str, entity_id: str) -> list[AuditEntry]:
         rows = self.store.fetchall(

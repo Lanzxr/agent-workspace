@@ -7,18 +7,19 @@ import sys
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Sequence
 
-from .control_plane import ControlPlane, InvalidTransition, NotFound
+from .control_plane import ControlPlane, ControlPlaneError, InvalidTransition, NotFound
 from .dssuperagent import (DEFAULT_DECISION_TIMEOUT_SECONDS, DssuperAgentAdapter, DssuperAgentError,
                            DssuperAgentProtocolError, DssuperAgentReceipt)
 from .execution import ExecutionDispatcher
+from .execution_state import ExecutionBusy
 from .identity import IdentityRegistry
 from .knowledge.service import KnowledgeService
 from .mcp_registry import McpServerSpec
-from .models import AssistantRun, Event, ExecutionResult, PlanStep, WorkItem, WorkPlan
+from .models import AssistantRun, Event, ExecutionResult, PlanStep, WorkItem, WorkPlan, is_group_source, is_im_source
 from .reply_contract import deliverable_files_markers, final_reply_markers
 from .shared_tools import SharedToolsManager
 from .tool_forge import ToolForgeService
-from .workspace import WorkspaceManager
+from .workspace import WorkspaceError, WorkspaceManager
 from .workspace_retention import get_retention_days, summarize_recent_workspace_files
 
 
@@ -64,12 +65,13 @@ class DssuperAgentWorkflow:
         policy: AssistantPolicy = AssistantPolicy(),
         decision_timeout: float = DEFAULT_DECISION_TIMEOUT_SECONDS,
         max_context_events: int = 10,
+        workspace_wait_seconds: float = 1800.0,
         on_execution_started: Callable[[Event, AssistantRun, WorkItem], None] | None = None,
     ) -> None:
         if (manager is None) != (dispatcher is None):
             raise ValueError("WorkspaceManager and ExecutionDispatcher must be configured together")
-        if decision_timeout <= 0 or not 0 <= max_context_events <= 10:
-            raise ValueError("decision_timeout must be positive and context is limited to ten events")
+        if decision_timeout <= 0 or not 0 <= max_context_events <= 10 or workspace_wait_seconds < 0:
+            raise ValueError("decision_timeout must be positive, context <= 10, and workspace_wait_seconds >= 0")
         self.plane = plane
         self.upstream = upstream
         self.manager = manager
@@ -87,6 +89,7 @@ class DssuperAgentWorkflow:
         self.policy = policy
         self.decision_timeout = decision_timeout
         self.max_context_events = max_context_events
+        self.workspace_wait_seconds = float(workspace_wait_seconds)
         self.on_execution_started = on_execution_started
 
     def process_event(
@@ -193,9 +196,13 @@ class DssuperAgentWorkflow:
             run.status = "executing"
             self.plane.save_assistant_run(run)
             return self._execute(run, event, workspace_id, {})
-        except (DssuperAgentError, InvalidTransition, NotFound, ValueError, OSError) as error:
+        except (DssuperAgentError, ExecutionBusy, WorkspaceError, InvalidTransition, NotFound, ValueError, OSError) as error:
             run.status = "failed"
-            run.error_category = getattr(error, "category", "workflow_error")
+            run.error_category = (
+                "workspace_busy"
+                if isinstance(error, ExecutionBusy)
+                else getattr(error, "category", "workflow_error")
+            )
             run.error = str(error)
             self.plane.save_assistant_run(run)
             raise
@@ -228,7 +235,18 @@ class DssuperAgentWorkflow:
         run.error = None
         run.error_category = None
         self.plane.save_assistant_run(run)
-        return self._execute(run, event, workspace_id, approval_refs or {})
+        try:
+            return self._execute(run, event, workspace_id, approval_refs or {})
+        except (DssuperAgentError, ExecutionBusy, WorkspaceError, InvalidTransition, NotFound, ValueError, OSError) as error:
+            run.status = "failed"
+            run.error_category = (
+                "workspace_busy"
+                if isinstance(error, ExecutionBusy)
+                else getattr(error, "category", "workflow_error")
+            )
+            run.error = str(error)
+            self.plane.save_assistant_run(run)
+            raise
 
     def record_event_context(self, event: Event) -> Event:
         """Persist an event in its conversation before attachment or model work starts."""
@@ -298,7 +316,7 @@ class DssuperAgentWorkflow:
 
     def _scope_tier_for_event(self, event: Event) -> str:
         identities = IdentityRegistry(self.plane.store)
-        if event.source_type in {"qq.group", "qq.guild"}:
+        if is_group_source(event.source_type):
             group = identities.get_group(event.source_type, event.source_id)
             return "internal" if (group is not None and group.tier == "internal") else "client_group"
         ks_settings = getattr(self.knowledge_service, "settings", None)
@@ -530,7 +548,7 @@ class DssuperAgentWorkflow:
         self._validate_capabilities(event, intent)
         self._validate_knowledge_documents(event, intent)
         self.manager.provision(workspace_id)
-        qq_reply = event.source_type.startswith("qq.")
+        qq_reply = is_im_source(event.source_type)
         item = self.plane.get_work_item(run.work_item_id)
         if item.status == "accepted":
             self.plane.queue_work_item(item.work_item_id)
@@ -606,7 +624,28 @@ class DssuperAgentWorkflow:
                 run.execution_ids.append(execution_id)
                 run.status = "executing"
                 self.plane.save_assistant_run(run)
-            result = self.dispatcher.dispatch(execution_id)
+            dispatch_fn = self.dispatcher.dispatch
+            dispatch_params = inspect.signature(dispatch_fn).parameters
+            try:
+                if "wait_seconds" in dispatch_params:
+                    result = dispatch_fn(execution_id, wait_seconds=self.workspace_wait_seconds)
+                else:
+                    result = dispatch_fn(execution_id)
+            except Exception as error:
+                error_category = (
+                    "workspace_busy"
+                    if isinstance(error, ExecutionBusy)
+                    else getattr(error, "category", type(error).__name__)
+                )
+                try:
+                    self.plane.fail_queued_execution(
+                        execution_id,
+                        error=str(error),
+                        error_category=str(error_category),
+                    )
+                except (ControlPlaneError, NotFound, ValueError):
+                    pass
+                raise
             meta_dict = result.metadata if isinstance(result.metadata, dict) else {}
             meta_sid = meta_dict.get("session_id")
             if isinstance(meta_sid, str) and meta_sid.strip():

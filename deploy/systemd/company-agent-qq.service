@@ -1,6 +1,7 @@
 [Unit]
 Description=Company Agent QQ channel
 Requires=company-agent@admin.service company-agent-superagent.service
+PartOf=company-agent.target
 After=network-online.target docker.service company-agent@admin.service company-agent-superagent.service
 
 [Service]
@@ -16,4 +17,4 @@ RestartSec=5
 UMask=0077
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=company-agent.target multi-user.target

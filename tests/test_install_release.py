@@ -95,3 +95,32 @@ class InstallReleaseConfigTests(unittest.TestCase):
         self.assertIn("WorkingDirectory=/opt/ca-deploy/current", rendered)
         self.assertIn("ExecStart=/var/lib/company-agent/venv/bin/python /opt/ca-deploy/current/run-release.py admin", rendered)
         self.assertNotIn("lan_z", rendered)
+
+    def test_wecom_service_unit_renders_deploy_user_and_wecom_role(self) -> None:
+        install_release = _load_install_release()
+        unit_path = Path(__file__).resolve().parents[1] / "deploy" / "systemd" / "company-agent-wecom.service"
+        rendered = install_release.render_systemd_unit(
+            unit_path.read_text(encoding="utf-8"),
+            user="corpbot",
+            group="corpbot",
+            home=PurePosixPath("/home/corpbot"),
+            deploy=PurePosixPath("/opt/ca-deploy"),
+            data=PurePosixPath("/var/lib/company-agent"),
+            config=PurePosixPath("/etc/company-agent/runtime.env"),
+        )
+        self.assertIn("User=corpbot", rendered)
+        self.assertIn("Group=corpbot", rendered)
+        self.assertIn("Environment=COMPANY_AGENT_DATA_DIR=/var/lib/company-agent", rendered)
+        self.assertIn("Environment=COMPANY_AGENT_CONFIG_PATH=/etc/company-agent/runtime.env", rendered)
+        self.assertIn("WorkingDirectory=/opt/ca-deploy/current", rendered)
+        self.assertIn("ExecStart=/var/lib/company-agent/venv/bin/python /opt/ca-deploy/current/run-release.py wecom", rendered)
+        self.assertIn("WantedBy=company-agent.target", rendered)
+        self.assertNotIn("lan_z", rendered)
+
+    def test_target_does_not_force_start_unconfigured_optional_channels(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "deploy" / "systemd"
+        target_text = (root / "company-agent.target").read_text(encoding="utf-8")
+        self.assertNotIn("company-agent-qq.service", target_text)
+        self.assertNotIn("company-agent-wecom.service", target_text)
+        self.assertIn("WantedBy=company-agent.target", (root / "company-agent-qq.service").read_text(encoding="utf-8"))
+        self.assertIn("WantedBy=company-agent.target", (root / "company-agent-wecom.service").read_text(encoding="utf-8"))

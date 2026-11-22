@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from .models import Event
+from .models import Event, is_group_source
 
 DEFAULT_DECISION_TIMEOUT_SECONDS = 600
 
@@ -144,7 +144,7 @@ class DssuperAgentAdapter:
         bot_aliases: list[str] | tuple[str, ...] | None = None,
         recent_messages: list[dict[str, Any]] | None = None,
     ) -> DssuperAgentClassifyResult:
-        if source_type not in {"qq.group", "qq.guild"}:
+        if not is_group_source(source_type):
             raise ValueError("classify_message is only used for group/guild conversations")
         clean_attachments = [
             {

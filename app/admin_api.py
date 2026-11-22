@@ -22,9 +22,10 @@ from .mcp_registry import (
     describe_mcp_servers,
     merge_mcp_servers,
 )
+from .models import source_identity_scope, source_provider
 from .observability import audit_label, list_conversations, trace_for_event
 from .ports import assert_port_available
-from .qq_channel import DEFAULT_AMBIENT_COOLDOWN_SECONDS, DEFAULT_BOT_ALIASES
+from .channel_core import DEFAULT_AMBIENT_COOLDOWN_SECONDS, DEFAULT_BOT_ALIASES
 from .scheduler import ScheduleService
 from .scheduler import SchedulerWorker
 from .shared_tools import SharedToolsManager
@@ -45,6 +46,7 @@ from .workspace_runtime import WorkspaceRuntime
 def make_handler(plane: ControlPlane, data_directory: Path, token: str,
                  knowledge_service: KnowledgeService | None = None,
                  qq_app_id: str | None = None,
+                 wecom_bot_id: str | None = None,
                  mcp_runtime_servers: tuple[McpServerSpec, ...] = (),
                  mcp_secrets: Mapping[str, str] | None = None,
                  tool_forge: ToolForgeService | None = None,
@@ -240,13 +242,14 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str,
                 active_executions = plane.store.fetchall(
                     "SELECT execution_id,work_item_id,status,updated_at,payload FROM executions "
                     "WHERE status IN ('queued','running') ORDER BY updated_at DESC LIMIT 20")
-                qq = plane.get_setting("qq_gateway", {})
-                heartbeat = qq.get("updated_at") if isinstance(qq, dict) else None
-                try:
-                    age = (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds()
-                    qq_state = qq.get("state") if age <= 90 else "offline"
-                except (TypeError, ValueError):
-                    qq_state = "unknown"
+                resolved_qq_id = qq_app_id or _infer_channel_account_id(plane, "qq")
+                resolved_wecom_id = wecom_bot_id or _infer_channel_account_id(plane, "wecom")
+                qq_state = _gateway_state(plane, "qq_gateway", configured=bool(qq_app_id) if qq_app_id is not None else None)
+                wecom_state = _gateway_state(
+                    plane,
+                    "wecom_gateway",
+                    configured=bool(wecom_bot_id) if wecom_bot_id is not None else bool(resolved_wecom_id),
+                )
                 dsh_web_enabled = bool(plane.get_setting("web_search_enabled", False))
                 dssuperagent_web_enabled = bool(plane.get_setting("dssuperagent_web_search_enabled", False))
                 downward_compat = bool(plane.get_setting("downward_compatibility_enabled", True))
@@ -283,7 +286,13 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str,
                                                        for row in active_executions],
                                         "recent_dsh": recent_dsh,
                                         "qq_gateway": qq_state,
-                                        "qq_app_id": qq_app_id or _infer_qq_app_id(plane),
+                                        "qq_app_id": resolved_qq_id,
+                                        "wecom_gateway": wecom_state,
+                                        "wecom_bot_id": resolved_wecom_id,
+                                        "channels": {
+                                            "qq": {"state": qq_state, "account_id": resolved_qq_id},
+                                            "wecom": {"state": wecom_state, "account_id": resolved_wecom_id},
+                                        },
                                         "knowledge_summary": knowledge_summary,
                                         "web_search_enabled": dsh_web_enabled,
                                         "dsh_web_search_enabled": dsh_web_enabled,
@@ -349,7 +358,8 @@ def make_handler(plane: ControlPlane, data_directory: Path, token: str,
                 identities = IdentityRegistry(plane.store)
                 return self._send(200, {
                     "users": [u.__dict__ for u in identities.list_users()],
-                    "qq_app_id": qq_app_id or _infer_qq_app_id(plane),
+                    "qq_app_id": qq_app_id or _infer_channel_account_id(plane, "qq"),
+                    "wecom_bot_id": wecom_bot_id or _infer_channel_account_id(plane, "wecom"),
                     "seen_external_actors": _seen_external_actors(plane, identities),
                 })
             if path == "/api/users" and method == "POST":
@@ -673,6 +683,7 @@ def serve(plane: ControlPlane, data_directory: Path, host: str, port: int, token
           scheduler_worker: SchedulerWorker | None = None, *,
           knowledge_service: KnowledgeService | None = None,
           qq_app_id: str | None = None,
+          wecom_bot_id: str | None = None,
           mcp_runtime_servers: tuple[McpServerSpec, ...] = (),
           mcp_secrets: Mapping[str, str] | None = None,
           tool_forge: ToolForgeService | None = None,
@@ -685,6 +696,7 @@ def serve(plane: ControlPlane, data_directory: Path, host: str, port: int, token
         make_handler(
             plane, data_directory, token, knowledge_service,
             qq_app_id=qq_app_id,
+            wecom_bot_id=wecom_bot_id,
             mcp_runtime_servers=mcp_runtime_servers,
             mcp_secrets=mcp_secrets,
             tool_forge=tool_forge,
@@ -746,14 +758,33 @@ def _directory_size(path: Path) -> int:
     return total
 
 
-def _infer_qq_app_id(plane: ControlPlane) -> str:
+def _gateway_state(plane: ControlPlane, setting_key: str, *, configured: bool | None = None) -> str:
+    raw = plane.get_setting(setting_key, {})
+    heartbeat = raw.get("updated_at") if isinstance(raw, dict) else None
+    if not heartbeat:
+        if configured is False:
+            return "disabled"
+        return "unknown"
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(heartbeat)).total_seconds()
+        return str(raw.get("state") or "unknown") if age <= 90 else "offline"
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def _infer_channel_account_id(plane: ControlPlane, prefix: str) -> str:
     row = plane.store.fetchone(
-        "SELECT event_id FROM events WHERE event_id LIKE 'qq:%' ORDER BY created_at DESC LIMIT 1"
+        "SELECT event_id FROM events WHERE event_id LIKE ? ORDER BY created_at DESC LIMIT 1",
+        (f"{prefix}:%",),
     )
     if row is None:
         return ""
     parts = str(row[0]).split(":", 3)
-    return parts[1] if len(parts) >= 3 and parts[0] == "qq" else ""
+    return parts[1] if len(parts) >= 3 and parts[0] == prefix else ""
+
+
+def _infer_qq_app_id(plane: ControlPlane) -> str:
+    return _infer_channel_account_id(plane, "qq")
 
 
 def _seen_external_actors(plane: ControlPlane, identities: IdentityRegistry) -> list[dict[str, str]]:
@@ -761,32 +792,33 @@ def _seen_external_actors(plane: ControlPlane, identities: IdentityRegistry) -> 
     rows = plane.store.fetchall(
         "SELECT payload,created_at FROM events ORDER BY created_at DESC LIMIT 200"
     )
-    seen: dict[tuple[str, str, str], dict[str, str]] = {}
+    seen: dict[tuple[str, str, str, str], dict[str, str]] = {}
     for row in rows:
         try:
             payload = json.loads(row[0])
         except json.JSONDecodeError:
             continue
         source_type = str(payload.get("source_type") or "")
-        if not source_type.startswith("qq."):
+        provider = source_provider(source_type)
+        if not provider:
             continue
         event_id = str(payload.get("event_id") or "")
         parts = event_id.split(":", 3)
-        account_id = parts[1] if len(parts) >= 3 and parts[0] == "qq" else ""
+        account_id = parts[1] if len(parts) >= 3 and parts[0] == provider else ""
         external_id = str(payload.get("external_actor_id") or "")
         if not external_id or not account_id:
             continue
         source_id = str(payload.get("source_id") or "")
-        scope_id = source_id if source_type == "qq.group" else "*"
-        key = (account_id, scope_id, external_id)
+        scope_id = source_identity_scope(source_type, source_id)
+        key = (provider, account_id, scope_id, external_id)
         if key in seen:
             continue
         resolved = identities.resolve(
-            provider="qq", account_id=account_id, scope_id=scope_id, external_id=external_id,
+            provider=provider, account_id=account_id, scope_id=scope_id, external_id=external_id,
         )
         matched_user = users.get(resolved)
         seen[key] = {
-            "provider": "qq",
+            "provider": provider,
             "account_id": account_id,
             "scope_id": scope_id,
             "source_type": source_type,

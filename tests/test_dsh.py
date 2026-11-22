@@ -4,6 +4,8 @@ import json
 import shlex
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -12,7 +14,7 @@ from unittest.mock import patch
 from app.control_plane import ControlPlane, InvalidTransition
 from app.dsh import DshAdapter
 from app.execution import ExecutionDispatcher
-from app.execution_state import ExecutionBusy
+from app.execution_state import ExecutionBusy, WorkspaceLease
 from app.models import Event, ExecutionRequest, PlanStep
 from app.runtime_config import RuntimeConfig
 from app.workspace import WorkspaceManager
@@ -547,6 +549,73 @@ class DshExecutionTests(unittest.TestCase):
         self.assertEqual(result.metadata["error_category"], "artifact_validation")
         self.assertTrue(result.metadata["soft_wrapup"]["triggered"])
         self.assertFalse(result.metadata["soft_wrapup"]["succeeded"])
+
+    def test_workspace_lease_queues_waiters_fifo_and_times_out_cleanly(self) -> None:
+        order: list[str] = []
+        entered_second = threading.Event()
+        entered_third = threading.Event()
+        release_first = threading.Event()
+
+        def worker(tag: str, wait: float, ready: threading.Event | None = None) -> None:
+            with self.manager.execution_lease("agent-1", wait_seconds=wait):
+                if ready is not None:
+                    ready.set()
+                order.append(f"start:{tag}")
+                if tag == "first":
+                    release_first.wait(timeout=3.0)
+                order.append(f"end:{tag}")
+
+        t1 = threading.Thread(target=worker, args=("first", 2.0, entered_second))
+        t1.start()
+        self.assertTrue(entered_second.wait(timeout=2.0))
+
+        # Second & third queue in arrival order behind first.
+        t2 = threading.Thread(target=worker, args=("second", 3.0))
+        t2.start()
+        deadline = time.monotonic() + 2.0
+        while not self.manager._lease_queues.get("agent-1") or len(self.manager._lease_queues["agent-1"]) < 2:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
+        t3 = threading.Thread(target=worker, args=("third", 3.0, entered_third))
+        t3.start()
+        while len(self.manager._lease_queues["agent-1"]) < 3:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+
+        # Short wait times out with ExecutionBusy without corrupting queue order.
+        with self.assertRaises(ExecutionBusy):
+            with self.manager.execution_lease("agent-1", wait_seconds=0.05):
+                pass
+
+        release_first.set()
+        t1.join(timeout=3.0)
+        t2.join(timeout=3.0)
+        t3.join(timeout=3.0)
+        self.assertTrue(entered_third.is_set())
+        self.assertEqual(
+            order,
+            ["start:first", "end:first", "start:second", "end:second", "start:third", "end:third"],
+        )
+        self.assertEqual(self.manager._lease_queues, {})
+
+        # External OS WorkspaceLease wait polling recovers once released.
+        lock_path = self.manager.base_directory / ".locks" / "agent-1.lock"
+        raw_lease = WorkspaceLease(lock_path)
+        raw_lease.__enter__()
+
+        def release_external() -> None:
+            time.sleep(0.12)
+            raw_lease.__exit__(None, None, None)
+
+        releaser = threading.Thread(target=release_external)
+        releaser.start()
+        try:
+            with self.manager.execution_lease("agent-1", wait_seconds=2.0):
+                order.append("external-ok")
+        finally:
+            releaser.join(timeout=2.0)
+        self.assertEqual(order[-1], "external-ok")
 
 
 if __name__ == "__main__":

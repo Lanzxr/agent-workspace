@@ -25,7 +25,7 @@ Company Agent 是一个通用的公司内部自主助理平台。它观察经过
 ## 目录（四大文档分类）
 
 ### 一、使用手册
-- [Company Agent 使用手册](docs/user-manual.md)（角色权限分级、QQ 群/私聊全部指令、Tool Forge 对话造工具与审批、Web 控制台功能详解）
+- [Company Agent 使用手册](docs/user-manual.md)（角色权限分级、QQ 与企业微信群/私聊全部指令、Tool Forge 对话造工具与审批、Web 控制台功能详解）
 
 ### 二、部署手册
 - [Company Agent 部署手册](docs/deployment-manual.md)（WSL2 与独立 Linux 服务器/云主机部署全流程、可配置部署用户、Docker 搜索与资料库、SSH 远程安全访问、升级与回滚）
@@ -42,5 +42,5 @@ Company Agent 是一个通用的公司内部自主助理平台。它观察经过
 
 ## 长期资料库
 
-QQ 长期资料库由 Company Agent 接入自托管 AnythingLLM。Company Agent 保管原件并在服务端校验群聊、私聊和管理员权限；DSSuperAgent 通过受控查询接口取得证据，DSH 不连接资料库。部署和迁移说明见 [AnythingLLM 接入说明](docs/09-knowledge-base.md)。500 MiB 是应用与代理目标限制，AnythingLLM 的真实解析能力仍须在部署环境通过大文件联调验收。
+QQ 与企业微信渠道共用受控长期资料库（自托管 AnythingLLM）。Company Agent 保管原件并在服务端校验群聊、私聊和管理员权限；DSSuperAgent 通过受控查询接口取得证据，DSH 不连接资料库。部署和迁移说明见 [AnythingLLM 接入说明](docs/09-knowledge-base.md)。500 MiB 是应用与代理目标限制，AnythingLLM 的真实解析能力仍须在部署环境通过大文件联调验收。
 

@@ -12,7 +12,7 @@
 |---|---|---|
 | **操作系统** | Ubuntu 22.04 / 24.04 或同类现代 Linux（systemd + cgroups v2） | WSL2 需启用 `systemd=true`；内核需允许用户命名空间（供 Bubblewrap 创建隔离命名空间） |
 | **Bubblewrap** | `bwrap` 可执行文件 | **强制必需**：DSH 所有 `bash` 沙箱均通过 `bwrap --unshare-net` 隔离 |
-| **Python** | Python `3.11+`（含 `venv` 与 `pip`） | 运行控制面、QQ 渠道、Tool Forge、Knowledge & Web Gate；运行依赖仅需 `websockets>=12,<17`（可选 `pypdf`） |
+| **Python** | Python `3.11+`（含 `venv` 与 `pip`） | 运行控制面、QQ 与企业微信渠道、Tool Forge、Knowledge & Web Gate；运行依赖需 `websockets>=12,<17` 与 `cryptography>=42,<52`（可选 `pypdf`） |
 | **Node.js & pnpm** | Node `^22.19.0` 或 `>=24.0.0`；`pnpm`（`11.x`） | 运行 DSSuperAgent 控制编排器与 DSH；构建 `dssuperagent-company-agent-step4` 时需要 `pnpm` |
 | **DSH 运行时** | `@deepseek-ai/dsh@0.2.2-rc.1` | 须固化安装到非 `/tmp` 目录下的稳定 `node_modules` |
 | **Docker + Compose** | 可选（启用联网搜索与长期资料库时必需） | 用于运行回环绑定的 `SearXNG`（默认 `:28770`）与 `AnythingLLM v1.19.0`（默认 `:28771`） |
@@ -45,7 +45,7 @@
 │   ├── runtime.env                  # 核心私钥与运行配置 (权限 0600)
 │   └── search.env                   # SearXNG SEARXNG_SECRET (可选, 0600)
 ├── .local/share/company-agent/      # 数据与运行根目录 (权限 0700, 严禁放 /tmp /mnt /run)
-│   ├── venv/                        # Python 虚拟环境 (含 websockets)
+│   ├── venv/                        # Python 虚拟环境 (含 websockets / cryptography)
 │   ├── control.sqlite               # 控制面 SQLite 数据库
 │   ├── forge-secrets.json           # Tool Forge 第三方凭据保险库 (0600)
 │   ├── forge-mcp-tokens.json        # Tool Forge 三层内部 MCP 令牌 (0600)
@@ -98,7 +98,7 @@ sudo apt-get install -y python3 python3-venv python3-pip bubblewrap git curl xz-
    sudo -u <USER> mkdir -p /home/<USER>/.local/share/company-agent /home/<USER>/.config/company-agent /home/<USER>/company-agent-step0/superagent-home
    sudo -u <USER> chmod 700 /home/<USER>/.local/share/company-agent /home/<USER>/.config/company-agent
    sudo -u <USER> python3 -m venv /home/<USER>/.local/share/company-agent/venv
-   sudo -u <USER> /home/<USER>/.local/share/company-agent/venv/bin/pip install --upgrade pip "websockets>=12,<17" pypdf
+   sudo -u <USER> /home/<USER>/.local/share/company-agent/venv/bin/pip install --upgrade pip "websockets>=12,<17" "cryptography>=42,<52" pypdf
    ```
 
 4. **安装 Node.js（22.19+ 或 24+）、pnpm 与 `@deepseek-ai/dsh@0.2.2-rc.1`**：
@@ -139,11 +139,18 @@ AGENT_MODEL_API_KEY=<替换为模型接口密钥>
 # 2. 本地管理控制台鉴权（必填：强随机 32+ 字符）
 COMPANY_AGENT_ADMIN_TOKEN=<替换为强随机管理员令牌>
 
-# 3. QQ Bot 接入（启用 qq-serve 时必填）
+# 3. QQ Bot 接入（仅启用 qq-serve 时必填；与企业微信互不冲突可单独或双开）
 QQBOT_APP_ID=<你的QQ机器人AppID>
 QQBOT_CLIENT_SECRET=<你的QQ机器人Secret>
 QQBOT_ALLOWED_PUBLICATIONS=group_update
 QQBOT_AUTO_EXECUTE_CAPABILITIES=dsh.task
+
+# 3b. 企业微信（WeCom）智能机器人长连接接入（仅启用 wecom-serve 时必填）
+WECOM_BOT_ID=<你的企微机器人BotID>
+WECOM_BOT_SECRET=<你的企微机器人Secret>
+WECOM_ALLOWED_PUBLICATIONS=group_update
+WECOM_AUTO_EXECUTE_CAPABILITIES=dsh.task
+COMPANY_AGENT_WECOM_WORKSPACE=wecom-files
 
 # 4. 端口与内部网关配置（默认 28765-28771；若冲突只需改 COMPANY_AGENT_PORT_BASE 即可整体平移）
 # COMPANY_AGENT_PORT_BASE=28765
@@ -252,8 +259,9 @@ sudo python3 ./company-agent/scripts/install-release.py \
 ### 7.1 服务与端口自检清单
 
 ```bash
-# 1. 所有单元应处于 active
-systemctl is-active company-agent.target company-agent@admin.service company-agent-qq.service company-agent-superagent.service
+# 1. 核心单元应处于 active（按实际配置的渠道追加 company-agent-qq.service / company-agent-wecom.service）
+systemctl is-active company-agent.target company-agent@admin.service company-agent-superagent.service
+systemctl is-active company-agent-qq.service company-agent-wecom.service   # 仅检测实际已配置凭据启用的渠道
 
 # 2. 回环监听端口确认（默认 28765-28771；旧环境或自定义端口按 runtime.env 实际端口查）
 ss -ltnp | grep -E '2876[5-9]|876[5-8]|3082'
@@ -279,7 +287,10 @@ stat -c '%a %U' /home/<USER>/.local/share/company-agent/forge-mcp-tokens.json   
 1. **`Agent Workspace must be outside /mnt, /run and /tmp`**：确认 `--data-dir` 与 `COMPANY_AGENT_ACCEPTANCE_ROOT` 未落在 `/mnt`、`/run` 或 `/tmp`；WSL 跑单元测试时可设置 `TMPDIR=/var/tmp/...`。
 2. **`Bubblewrap is required for DSH Shell isolation`**：未安装 `bwrap`，或内核禁用非特权 user namespace。
 3. **`DSH 0.2.2-rc.1 is not installed` 或路径错误**：检查构建传入的 `--dsh-bin` 是否真实存在且不在 `/tmp` 下，`runtime.json` 中的 Node 路径对部署用户有可读可执行权限。
-4. **云服务器上 QQ Gateway 连不上**：检查出网防火墙对 `bots.qq.com` WSS/HTTPS 443 的放行情况；查看实时日志：
+4. **云服务器上 QQ / 企业微信 Gateway 连不上**：
+   - QQ 放行 `bots.qq.com`（WSS/HTTPS 443）；企业微信放行 `openws.work.weixin.qq.com`（WSS 443）与企微临时媒体 HTTPS 下载域名；
+   - 注意企业微信同一 `WECOM_BOT_ID` 同时只允许**一个在线 WebSocket 长连接**，如切新环境会被 `disconnected_event` 踢下线，请勿对同一 BotID 在多台服务器重复启动 `company-agent-wecom.service`；
+   - 查看实时日志：
    ```bash
-   journalctl -u company-agent@admin.service -u company-agent-qq.service -u company-agent-superagent.service -n 100 --no-pager
+   journalctl -u company-agent@admin.service -u company-agent-qq.service -u company-agent-wecom.service -u company-agent-superagent.service -n 100 --no-pager
    ```

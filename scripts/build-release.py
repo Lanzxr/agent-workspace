@@ -88,7 +88,13 @@ if __name__ == "__main__":
             add(dss / name, "dss/" + name)
         add(company / "scripts" / "run-release.py", "run-release.py")
         add(company / "deploy" / "search", "search")
-        for service in ["company-agent@.service", "company-agent-qq.service", "company-agent-superagent.service", "company-agent.target"]:
+        for service in [
+            "company-agent@.service",
+            "company-agent-qq.service",
+            "company-agent-wecom.service",
+            "company-agent-superagent.service",
+            "company-agent.target",
+        ]:
             add(company / "deploy" / "systemd" / service, "systemd/" + service)
         add(company / "deploy" / "anythingllm" / "apply-egress-firewall.sh", "anythingllm/apply-egress-firewall.sh")
         add(company / "deploy" / "anythingllm" / "anythingllm-egress-firewall.service", "anythingllm/anythingllm-egress-firewall.service")

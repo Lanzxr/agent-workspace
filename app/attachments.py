@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import json
@@ -7,6 +8,7 @@ import re
 import socket
 import shutil
 import tempfile
+import threading
 import zipfile
 import hashlib
 import os
@@ -16,11 +18,11 @@ from http.client import HTTPSConnection
 from html import unescape
 from ipaddress import ip_address
 from pathlib import Path
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import unquote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener, urlopen
 from xml.etree import ElementTree
 
-from .models import Event
+from .models import Event, is_direct_source, is_group_source
 from .store import Store
 from .knowledge.config import MAX_KNOWLEDGE_FILE_BYTES
 from .knowledge.file_types import detect_file
@@ -100,6 +102,97 @@ def _attachment_opener(host: str, timeout: float):
     return build_opener(ProxyHandler({}), _NoRedirect(), PinnedHTTPSHandler())
 
 
+def decrypt_wecom_media(encrypted_data: bytes, aes_key: str) -> bytes:
+    """Decrypt WeCom AI-Bot media bytes using AES-256-CBC and 32-byte PKCS#7 unpadding."""
+    if not encrypted_data:
+        raise ValueError("encrypted media payload is empty")
+    raw_key = (aes_key or "").strip()
+    if not raw_key:
+        raise ValueError("WeCom media aeskey is required")
+    padded = raw_key + ("=" * ((4 - len(raw_key) % 4) % 4))
+    try:
+        key = base64.b64decode(padded, validate=True)
+    except Exception as error:
+        raise ValueError("WeCom media aeskey must be valid base64") from error
+    if len(key) != 32:
+        raise ValueError("WeCom media aeskey must decode to 32 bytes")
+    iv = key[:16]
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    data = encrypted_data
+    remainder = len(data) % 16
+    if remainder:
+        data = data + (b"\x00" * (16 - remainder))
+    decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+    decrypted = decryptor.update(data) + decryptor.finalize()
+    if not decrypted:
+        raise ValueError("decrypted WeCom media is empty")
+    pad_len = decrypted[-1]
+    if pad_len < 1 or pad_len > 32 or pad_len > len(decrypted):
+        raise ValueError(f"invalid PKCS#7 padding length: {pad_len}")
+    if any(b != pad_len for b in decrypted[-pad_len:]):
+        raise ValueError("invalid PKCS#7 padding bytes")
+    plaintext = decrypted[:-pad_len]
+    if not plaintext:
+        raise ValueError("decrypted WeCom media has no payload bytes")
+    return plaintext
+
+
+def _parse_content_disposition_filename(header_value: str | None) -> str | None:
+    if not header_value:
+        return None
+    utf8_match = re.search(r"filename\*\s*=\s*(?:UTF-8|utf-8)''([^;\s]+)", header_value, re.IGNORECASE)
+    if utf8_match:
+        decoded = unquote(utf8_match.group(1)).strip().strip('"\'')
+        return Path(decoded).name[:180] if decoded else None
+    plain_match = re.search(r'filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;\s]+)', header_value, re.IGNORECASE)
+    if plain_match:
+        raw = (plain_match.group(1) or plain_match.group(2) or "").strip()
+        decoded = unquote(raw).strip().strip('"\'')
+        return Path(decoded).name[:180] if decoded else None
+    return None
+
+
+def _infer_media_extension(data: bytes, content_type: str | None = None) -> str:
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return ".webp"
+    if data.startswith(b"%PDF-"):
+        return ".pdf"
+    if data.startswith(b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                names = set(zf.namelist())
+                if any(n.startswith("word/") for n in names):
+                    return ".docx"
+                if any(n.startswith("xl/") for n in names):
+                    return ".xlsx"
+                if any(n.startswith("ppt/") for n in names):
+                    return ".pptx"
+        except Exception:
+            pass
+    ct = (content_type or "").split(";", 1)[0].strip().lower()
+    mapping = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "application/pdf": ".pdf",
+        "text/plain": ".txt",
+        "text/markdown": ".md",
+        "text/csv": ".csv",
+        "application/json": ".json",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    }
+    return mapping.get(ct, "")
+
+
 class AttachmentIngestor:
     """Persist stable attachment references before processing and update them in place."""
 
@@ -116,6 +209,9 @@ class AttachmentIngestor:
         self.store, self.max_bytes, self.max_chars, self.timeout = store, max_bytes, max_chars, timeout
         self.knowledge_service = knowledge_service
         self.storage_directory = storage_directory.resolve() if storage_directory else None
+        self._ephemeral_lock = threading.Lock()
+        self._decrypt_keys: dict[tuple[str, int], str] = {}
+        self._download_meta: dict[str, tuple[str | None, str | None]] = {}
 
     def register_event(self, event: Event) -> Event:
         """Create pending attachment references without waiting for download or OCR."""
@@ -128,6 +224,10 @@ class AttachmentIngestor:
             attachment_id = "attachment-" + hashlib.sha256(
                 f"{event.event_id}\0{index}".encode("utf-8")).hexdigest()[:32]
             raw_url = item.get("url") if isinstance(item.get("url"), str) else None
+            raw_key = item.get("decrypt_key") if isinstance(item.get("decrypt_key"), str) else item.get("aeskey")
+            if isinstance(raw_key, str) and raw_key.strip():
+                with self._ephemeral_lock:
+                    self._decrypt_keys[(event.event_id, index)] = raw_key.strip()
             payload = {
                 "attachment_id": attachment_id, "event_id": event.event_id, "index": index,
                 "filename": filename, "content_type": content_type,
@@ -158,6 +258,9 @@ class AttachmentIngestor:
                 original_path = payload.get("original_path")
                 if isinstance(original_path, str) and Path(original_path).is_file():
                     continue
+            decrypt_key = None
+            with self._ephemeral_lock:
+                decrypt_key = self._decrypt_keys.pop((event.event_id, int(payload["index"])), None)
             try:
                 url = payload.get("url")
                 if not isinstance(url, str):
@@ -167,7 +270,28 @@ class AttachmentIngestor:
                 current = self._refresh_event(current, on_update)
                 with tempfile.TemporaryDirectory(prefix="company-agent-attachment-") as temp_dir:
                     path = Path(temp_dir) / "download"
-                    size_bytes = self._download_to(url, path)
+                    try:
+                        size_bytes = self._download_to(url, path)
+                    finally:
+                        with self._ephemeral_lock:
+                            header_filename, header_ct = self._download_meta.pop(str(path), (None, None))
+                    if decrypt_key is not None:
+                        plaintext = decrypt_wecom_media(path.read_bytes(), decrypt_key)
+                        path.write_bytes(plaintext)
+                        size_bytes = len(plaintext)
+                    chosen_name = str(payload.get("filename") or "")
+                    if header_filename:
+                        safe_hdr = _safe_filename(header_filename, int(payload["index"]))
+                        if Path(chosen_name).suffix == "" or chosen_name.startswith(("attachment-", "wecom-image", "wecom-file", "wecom-video")):
+                            chosen_name = safe_hdr
+                    if not Path(chosen_name).suffix:
+                        sample = path.read_bytes()[:4096]
+                        inferred_ext = _infer_media_extension(sample, header_ct or str(payload.get("content_type") or ""))
+                        if inferred_ext:
+                            chosen_name = f"{chosen_name}{inferred_ext}"[:180]
+                    if chosen_name != payload["filename"]:
+                        payload["filename"] = chosen_name
+                        payload["sensitive"] = _looks_sensitive(chosen_name)
                     if self.knowledge_service:
                         original = self.knowledge_service.preserve_original_file(
                             current, payload["index"], path, payload["filename"])
@@ -264,9 +388,9 @@ class AttachmentIngestor:
     def _scope(self, event: Event) -> tuple[str, str]:
         if self.knowledge_service is not None and hasattr(self.knowledge_service, "source_scope"):
             return self.knowledge_service.source_scope(event)
-        if event.source_type in {"qq.group", "qq.guild"}:
+        if is_group_source(event.source_type):
             return "group", event.source_id
-        if event.source_type in {"qq.direct", "qq.private", "qq.c2c"}:
+        if is_direct_source(event.source_type):
             return "direct", event.conversation_id
         return event.source_type, event.conversation_id
 
@@ -318,6 +442,10 @@ class AttachmentIngestor:
         total = 0
         with _attachment_opener(parsed.hostname, self.timeout).open(request, timeout=self.timeout) as response, \
                 destination.open("xb") as output:
+            header_filename = _parse_content_disposition_filename(response.headers.get("Content-Disposition"))
+            header_ct = response.headers.get("Content-Type")
+            with self._ephemeral_lock:
+                self._download_meta[str(destination)] = (header_filename, header_ct)
             length = response.headers.get("Content-Length")
             if length and int(length) > self.max_bytes:
                 raise ValueError("attachment exceeds the size limit")

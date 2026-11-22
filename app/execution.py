@@ -32,14 +32,14 @@ class ExecutionDispatcher:
         self.knowledge_delivery = KnowledgeDelivery(knowledge_service, manager) if knowledge_service else None
         self.receipt_directory = private_directory(runtime_directory.resolve() / "receipts")
 
-    def dispatch(self, execution_id: str) -> ExecutionResult:
+    def dispatch(self, execution_id: str, *, wait_seconds: float = 0.0) -> ExecutionResult:
         validate_execution_id(execution_id)
         if len(execution_id) > 128:
             raise ValueError("execution_id exceeds 128 characters")
         request = self.plane.get_execution(execution_id)
         if request.capability != "dsh.task":
             raise ValueError("dispatcher only accepts dsh.task")
-        with self.manager.execution_lease(request.workspace_id) as lease:
+        with self.manager.execution_lease(request.workspace_id, wait_seconds=wait_seconds) as lease:
             request = self.plane.get_execution(execution_id)
             if request.status in TERMINAL_STATUSES:
                 return self.plane.get_execution_result(execution_id)

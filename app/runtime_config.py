@@ -22,8 +22,8 @@ def parse_forge_mcp_settings(values: Mapping[str, str]) -> tuple[bool, str, int,
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("COMPANY_AGENT_FORGE_MCP_HOST must bind to 127.0.0.1 or localhost")
     owner = str(values.get("COMPANY_AGENT_FORGE_MCP_OWNER") or "admin").strip().lower() or "admin"
-    if owner not in {"admin", "qq"}:
-        raise ValueError("COMPANY_AGENT_FORGE_MCP_OWNER must be admin or qq")
+    if owner not in {"admin", "qq", "wecom"}:
+        raise ValueError("COMPANY_AGENT_FORGE_MCP_OWNER must be admin, qq, or wecom")
     return enabled, host, ports.forge_mcp_port, owner
 
 DSH_VERSION = "0.2.2-rc.1"
@@ -39,6 +39,23 @@ class QQBotSettings:
     auto_execute_capabilities: frozenset[str] = frozenset()
     workspace_id: str | None = None
     isolate_workspaces: bool = True
+
+    @property
+    def channel_name(self) -> str:
+        return "qq"
+
+    @property
+    def account_id(self) -> str:
+        return self.app_id
+
+    @classmethod
+    def is_configured(cls, path: Path) -> bool:
+        if not path.is_file():
+            return False
+        values = RuntimeConfig._parse_env(path)
+        app_id = (values.get("QQBOT_APP_ID") or values.get("QQBOT_APPID") or "").strip()
+        secret = (values.get("QQBOT_CLIENT_SECRET") or values.get("QQBOT_SECRET") or "").strip()
+        return bool(app_id and secret)
 
     @classmethod
     def load(cls, path: Path) -> "QQBotSettings":
@@ -74,6 +91,94 @@ class QQBotSettings:
         }
         return cls(app_id, client_secret, allowed, api_base_url, auto_execute, workspace_id,
                    isolate_workspaces=isolate_workspaces)
+
+
+WECOM_DEFAULT_WS_URL = "wss://openws.work.weixin.qq.com"
+
+
+@dataclass(frozen=True)
+class WeComBotSettings:
+    bot_id: str
+    bot_secret: str = field(repr=False)
+    allowed_publications: frozenset[str] = frozenset()
+    ws_url: str = WECOM_DEFAULT_WS_URL
+    auto_execute_capabilities: frozenset[str] = frozenset()
+    workspace_id: str | None = None
+    isolate_workspaces: bool = True
+    group_direct_on_callback: bool = True
+
+    @property
+    def channel_name(self) -> str:
+        return "wecom"
+
+    @property
+    def account_id(self) -> str:
+        return self.bot_id
+
+    @classmethod
+    def is_configured(cls, path: Path) -> bool:
+        if not path.is_file():
+            return False
+        values = RuntimeConfig._parse_env(path)
+        bot_id = (values.get("WECOM_BOT_ID") or values.get("COMPANY_AGENT_WECOM_BOT_ID") or "").strip()
+        secret = (values.get("WECOM_BOT_SECRET") or values.get("COMPANY_AGENT_WECOM_BOT_SECRET") or "").strip()
+        return bool(bot_id and secret)
+
+    @classmethod
+    def load(cls, path: Path) -> "WeComBotSettings":
+        if not path.is_file():
+            raise ValueError(f"runtime configuration not found: {path}")
+        values = RuntimeConfig._parse_env(path)
+        bot_id = (values.get("WECOM_BOT_ID") or values.get("COMPANY_AGENT_WECOM_BOT_ID") or "").strip()
+        bot_secret = (values.get("WECOM_BOT_SECRET") or values.get("COMPANY_AGENT_WECOM_BOT_SECRET") or "").strip()
+        if not bot_id or not bot_secret:
+            raise ValueError("WECOM_BOT_ID and WECOM_BOT_SECRET are required")
+        if any(character in bot_id + bot_secret for character in "\r\n\x00"):
+            raise ValueError("WeCom bot credentials must be single-line values")
+        allowed = frozenset(
+            value.strip() for value in values.get("WECOM_ALLOWED_PUBLICATIONS", "").split(",") if value.strip()
+        )
+        supported = {"group_update", "urgent_escalation"}
+        if not allowed.issubset(supported):
+            raise ValueError("WECOM_ALLOWED_PUBLICATIONS supports group_update and urgent_escalation")
+        ws_url = (values.get("WECOM_WS_URL") or WECOM_DEFAULT_WS_URL).strip()
+        parsed = urlsplit(ws_url)
+        if (
+            parsed.scheme != "wss"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ValueError("WECOM_WS_URL must be a wss:// URL without embedded credentials or fragment")
+        auto_execute = frozenset(
+            value.strip()
+            for value in values.get("WECOM_AUTO_EXECUTE_CAPABILITIES", "").split(",")
+            if value.strip()
+        )
+        if not auto_execute.issubset({"dsh.task"}):
+            raise ValueError("WECOM_AUTO_EXECUTE_CAPABILITIES currently supports only dsh.task")
+        workspace_id = values.get("COMPANY_AGENT_WECOM_WORKSPACE", "").strip() or None
+        if auto_execute and not workspace_id:
+            raise ValueError("COMPANY_AGENT_WECOM_WORKSPACE is required when WeCom task execution is enabled")
+        if workspace_id and (len(workspace_id) > 64 or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", workspace_id)):
+            raise ValueError("COMPANY_AGENT_WECOM_WORKSPACE must be a 1-64 character workspace ID")
+        isolate_workspaces = values.get("COMPANY_AGENT_WECOM_ISOLATE_WORKSPACES", "true").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        group_direct_on_callback = values.get("WECOM_GROUP_DIRECT_ON_CALLBACK", "true").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        return cls(
+            bot_id=bot_id,
+            bot_secret=bot_secret,
+            allowed_publications=allowed,
+            ws_url=ws_url,
+            auto_execute_capabilities=auto_execute,
+            workspace_id=workspace_id,
+            isolate_workspaces=isolate_workspaces,
+            group_direct_on_callback=group_direct_on_callback,
+        )
 
 
 @dataclass(frozen=True)

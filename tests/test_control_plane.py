@@ -4,12 +4,14 @@ import tempfile
 import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.control_plane import ControlPlane, InvalidTransition
 from app.fake_adapters import DeterministicAssistantAdapter
-from app.models import Event, ExecutionResult, PlanStep
+from app.models import AssistantRun, Event, ExecutionResult, PlanStep
 from app.store import Store
+from app.workspace import WorkspaceManager
 
 
 class ControlPlaneTests(unittest.TestCase):
@@ -377,6 +379,68 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(self.plane.get_execution("execution-1").status, "queued")
         self.assertEqual(self.plane.get_plan("plan-1").steps[0].status, "ready")
         self.assertEqual(self.plane.get_work_item("work-1").status, "queued")
+
+    def test_fail_queued_execution_and_reconcile_abandoned_queued(self) -> None:
+        self.plane.ingest_event(self.event("event-q1"))
+        self.plane.ingest_event(self.event("event-q2"))
+        self.plane.create_conversation(
+            conversation_id="conversation-1", kind="test",
+            participant_refs=["actor-1"], policy_version="policy-1",
+        )
+        manager = WorkspaceManager(Path(self.temp_dir.name) / "workspaces")
+        manager.provision("ws-q1")
+        manager.provision("ws-q2")
+
+        for suffix, ev_id, ws_id in (("1", "event-q1", "ws-q1"), ("2", "event-q2", "ws-q2")):
+            self.plane.create_work_item(
+                work_item_id=f"work-{suffix}", title=f"W{suffix}", objective="O",
+                source_event_ids=[ev_id], completion_conditions=["done"],
+                risk_class="low", owner_ref="actor-1",
+            )
+            self.plane.propose_work_item(f"work-{suffix}")
+            self.plane.accept_work_item(f"work-{suffix}")
+            self.plane.queue_work_item(f"work-{suffix}")
+            self.plane.create_plan(
+                plan_id=f"plan-{suffix}", work_item_id=f"work-{suffix}",
+                steps=[PlanStep(step_id=f"step-{suffix}", ordinal=1, title="Run", capability="dsh.task")],
+            )
+            self.plane.create_execution_request(
+                execution_id=f"exec-{suffix}", work_item_id=f"work-{suffix}",
+                plan_step_id=f"step-{suffix}", workspace_id=ws_id, capability="dsh.task", parameters={},
+            )
+            self.plane.save_assistant_run(AssistantRun(
+                event_id=ev_id, status="executing", conversation_id="conversation-1",
+                thread_id="thread-1", work_item_id=f"work-{suffix}", plan_id=f"plan-{suffix}",
+                workspace_id=ws_id, execution_ids=[f"exec-{suffix}"], policy_version="policy-1",
+            ))
+
+        # Simulate stale timestamps and verify reconcile skips a held workspace lease.
+        old_ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        with self.plane.store.transaction() as conn:
+            conn.execute("UPDATE executions SET updated_at = ?", (old_ts,))
+            # Re-encode payload updated_at so get_execution/decode matches.
+            for eid in ("exec-1", "exec-2"):
+                req = self.plane.get_execution(eid)
+                req.updated_at = old_ts
+                conn.execute("UPDATE executions SET payload = ? WHERE execution_id = ?",
+                             (self.plane.store.encode(req.to_dict()), eid))
+
+        with manager.execution_lease("ws-q2"):
+            reconciled = self.plane.reconcile_abandoned_queued(manager, min_age_seconds=60.0)
+        self.assertEqual(reconciled, ["exec-1"])
+        self.assertEqual(self.plane.get_execution("exec-1").status, "failed")
+        self.assertEqual(self.plane.get_work_item("work-1").status, "failed")
+        self.assertEqual(self.plane.get_assistant_run("event-q1").status, "failed")
+        self.assertEqual(self.plane.get_execution("exec-2").status, "queued")
+
+        # Mark event-q2 run terminal while exec-2 is queued, then reopen -> recover_unfinished settles it.
+        run2 = self.plane.get_assistant_run("event-q2")
+        run2.status = "failed"
+        self.plane.save_assistant_run(run2)
+        self.plane.close()
+        self.plane = ControlPlane.open(Path(self.temp_dir.name) / "control.sqlite")
+        self.assertEqual(self.plane.get_execution("exec-2").status, "failed")
+        self.assertEqual(self.plane.get_work_item("work-2").status, "failed")
 
 
 if __name__ == "__main__":

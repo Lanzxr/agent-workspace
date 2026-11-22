@@ -1,8 +1,8 @@
 [Unit]
 Description=Company Agent deployment target
-Requires=company-agent@admin.service company-agent-superagent.service company-agent-qq.service
-Wants=company-agent@admin.service company-agent-superagent.service company-agent-qq.service
-After=network-online.target docker.service company-agent@admin.service company-agent-superagent.service company-agent-qq.service
+Requires=company-agent@admin.service company-agent-superagent.service
+Wants=company-agent@admin.service company-agent-superagent.service
+After=network-online.target docker.service company-agent@admin.service company-agent-superagent.service
 
 [Install]
 WantedBy=multi-user.target

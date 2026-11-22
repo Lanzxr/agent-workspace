@@ -184,7 +184,7 @@ def stop_legacy(data_dir: Path) -> None:
         company_data = str(data_dir)
         if (("/tmp/company-agent-run-bin/dsh --profile superagent" in cmd)
                 or (" -m app " in f" {cmd} " and company_data in cmd
-                    and ("qq-serve" in cmd or "admin-serve" in cmd))
+                    and ("qq-serve" in cmd or "wecom-serve" in cmd or "admin-serve" in cmd))
                 or ("node " in cmd and "/dsh-superagent/" in cwd)):
             candidates[pid] = cmd[:240]
     for pid in candidates:
@@ -300,7 +300,13 @@ def main(argv: list[str] | None = None) -> None:
 
     ports = resolve_port_settings(runtime_values)
 
-    for unit in ["company-agent.target", "company-agent-qq.service", "company-agent-superagent.service", "company-agent@admin.service"]:
+    for unit in [
+        "company-agent.target",
+        "company-agent-qq.service",
+        "company-agent-wecom.service",
+        "company-agent-superagent.service",
+        "company-agent@admin.service",
+    ]:
         run("systemctl", "stop", unit, check=False)
     stop_legacy(DATA)
 
@@ -350,8 +356,17 @@ def main(argv: list[str] | None = None) -> None:
     if OLD_CODE.parent.exists():
         OLD_CODE.symlink_to(f"{DEPLOY}/current/dss", target_is_directory=True)
 
-    for name in ["company-agent@.service", "company-agent-qq.service", "company-agent-superagent.service", "company-agent.target"]:
-        unit_text = (release / "systemd" / name).read_text(encoding="utf-8")
+    for name in [
+        "company-agent@.service",
+        "company-agent-qq.service",
+        "company-agent-wecom.service",
+        "company-agent-superagent.service",
+        "company-agent.target",
+    ]:
+        src_unit = release / "systemd" / name
+        if not src_unit.is_file():
+            continue
+        unit_text = src_unit.read_text(encoding="utf-8")
         rendered_unit = render_systemd_unit(
             unit_text,
             user=deploy_user,
@@ -381,13 +396,50 @@ def main(argv: list[str] | None = None) -> None:
     else:
         run("systemctl", "daemon-reload")
 
+    qq_configured = bool(
+        (runtime_values.get("QQBOT_APP_ID") or runtime_values.get("QQBOT_APPID") or "").strip()
+        and (runtime_values.get("QQBOT_CLIENT_SECRET") or runtime_values.get("QQBOT_SECRET") or "").strip()
+    )
+    wecom_configured = bool(
+        (runtime_values.get("WECOM_BOT_ID") or runtime_values.get("COMPANY_AGENT_WECOM_BOT_ID") or "").strip()
+        and (runtime_values.get("WECOM_BOT_SECRET") or runtime_values.get("COMPANY_AGENT_WECOM_BOT_SECRET") or "").strip()
+    )
+    if wecom_configured:
+        venv_python = DATA / "venv/bin/python"
+        if venv_python.is_file():
+            dep_check = run(str(venv_python), "-c", "import cryptography", check=False)
+            if dep_check.returncode != 0:
+                raise RuntimeError(
+                    "WECOM_BOT_ID is configured, but 'cryptography' is missing from runtime venv; "
+                    f"install it first via: {venv_python} -m pip install 'cryptography>=42,<52'"
+                )
+
+    if qq_configured:
+        run("systemctl", "enable", "company-agent-qq.service", check=False)
+    else:
+        run("systemctl", "disable", "--now", "company-agent-qq.service", check=False)
+        run("systemctl", "reset-failed", "company-agent-qq.service", check=False)
+    if (SYSTEMD / "company-agent-wecom.service").is_file():
+        if wecom_configured:
+            run("systemctl", "enable", "company-agent-wecom.service", check=False)
+        else:
+            run("systemctl", "disable", "--now", "company-agent-wecom.service", check=False)
+            run("systemctl", "reset-failed", "company-agent-wecom.service", check=False)
     run("systemctl", "enable", "company-agent.target")
     run("systemctl", "start", "company-agent.target")
+    if qq_configured:
+        run("systemctl", "start", "company-agent-qq.service")
+    if wecom_configured and (SYSTEMD / "company-agent-wecom.service").is_file():
+        run("systemctl", "start", "company-agent-wecom.service")
     print(json.dumps({
         "user": deploy_user,
         "release": str(release),
         "backup": str(backup),
         "current": str(current.resolve()),
+        "channels": {
+            "qq": qq_configured,
+            "wecom": wecom_configured,
+        },
         "ports": {
             "admin": ports.admin_port,
             "knowledge": ports.knowledge_api_port,
