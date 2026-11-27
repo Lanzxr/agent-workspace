@@ -70,6 +70,8 @@ class ToolForgeTests(unittest.TestCase):
                 return ["127.0.0.1"]
             if host == "lan-leak.evil.test":
                 return ["10.0.0.5"]
+            if host == "fakeip-proxy.example.com":
+                return ["198.18.2.40"]
             return ["93.184.216.34"]
 
         self.http_calls: list[dict[str, object]] = []
@@ -131,6 +133,11 @@ class ToolForgeTests(unittest.TestCase):
         with self.assertRaises(ToolForgeSecurityError):
             self.forge.probe_http(url="https://lan-leak.evil.test/steal")
 
+        # TUN Fake-IP (198.18.0.0/15) for an explicitly allowlisted domain is permitted
+        self.forge.add_domain("fakeip-proxy.example.com", created_by="admin-1")
+        fake_ip_res = self.forge.probe_http(url="https://fakeip-proxy.example.com/v1/ping")
+        self.assertEqual(fake_ip_res["status_code"], 200)
+
     def test_secret_vault_redaction_and_http_api_lifecycle(self) -> None:
         secret_val = "sk-super-secret-service-987654"
         self.forge.add_domain("api.example.com", created_by="admin-1")
@@ -167,11 +174,12 @@ class ToolForgeTests(unittest.TestCase):
                 "method": "GET",
                 "url_template": "https://api.example.com/v1/echo",
                 "headers": {"Authorization": "Bearer {{SERVICE_API_KEY}}"},
-                "query_template": {"org": "{{args.org}}"},
+                "query_template": {"org": "{{org}}"},
             },
             allowed_domains=["api.example.com"],
             default_test_input={"org": "acme"},
         )
+        self.assertEqual(self.forge.get_tool("service_echo")["definition"]["secret_refs"], ["SERVICE_API_KEY"])
 
         # Cannot submit before passing test
         with self.assertRaises(ToolForgeValidationError):

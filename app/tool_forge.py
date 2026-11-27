@@ -34,7 +34,11 @@ from .ports import DEFAULT_FORGE_MCP_PORT
 from .shared_tools import SCRIPT_NAME_PATTERN, SharedToolsManager
 
 _TEMPLATE_REF_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]{0,63})\s*\}\}")
+_ARG_PLACEHOLDER_RE = re.compile(
+    r"\{\{\s*(?:args\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\}\}|\{(?:args\.)?([A-Za-z_][A-Za-z0-9_]*)\}"
+)
 _HMAC_CALL_SECRET_RE = re.compile(r"""hmac_sha256\(\s*['"]([A-Za-z_][A-Za-z0-9_]{0,63})['"]""")
+_TUN_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 TOOL_ID_RE = re.compile(r"^[a-z][a-z0-9_]{2,47}$")
 DOMAIN_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$")
 FORGE_TOOL_KINDS = ("http_api", "python_plugin", "shared_script")
@@ -424,7 +428,12 @@ def validate_outbound_url(
         addr = ipaddress.ip_address(raw_ip.split("%", 1)[0])
         if addr.is_loopback or addr.is_unspecified or addr.is_link_local or addr.is_multicast:
             raise ToolForgeSecurityError(f"resolved address {addr} is forbidden (loopback/link-local/multicast)")
-        if addr.is_private and not explicit_private_ip:
+        is_tun_fake_ip = (
+            literal_ip is None
+            and isinstance(addr, ipaddress.IPv4Address)
+            and addr in _TUN_FAKE_IP_NETWORK
+        )
+        if addr.is_private and not explicit_private_ip and not is_tun_fake_ip:
             raise ToolForgeSecurityError(f"domain {hostname!r} resolved to private address {addr} without explicit IP allowlist")
 
     return url
@@ -450,14 +459,20 @@ def _expand_nested_with_secrets(value: Any, secret_map: Mapping[str, str]) -> An
     return value
 
 
-def extract_referenced_secrets(raw: Any, *, include_hmac_calls: bool = False) -> tuple[str, ...]:
+def extract_referenced_secrets(
+    raw: Any,
+    *,
+    include_hmac_calls: bool = False,
+    exclude_names: Iterable[str] = (),
+) -> tuple[str, ...]:
     found: set[str] = set()
+    excluded = {str(name).strip() for name in exclude_names if str(name).strip()}
 
     def _walk(node: Any) -> None:
         if isinstance(node, str):
-            found.update(_TEMPLATE_REF_RE.findall(node))
+            found.update(name for name in _TEMPLATE_REF_RE.findall(node) if name not in excluded)
             if include_hmac_calls:
-                found.update(_HMAC_CALL_SECRET_RE.findall(node))
+                found.update(name for name in _HMAC_CALL_SECRET_RE.findall(node) if name not in excluded)
         elif isinstance(node, list):
             for item in node:
                 _walk(item)
@@ -890,32 +905,30 @@ def _extract_path(payload: Any, dotted_path: str) -> Any:
     return current
 
 
-def _render_arg_template(value: Any, args: Mapping[str, Any]) -> Any:
+def _render_arg_template(value: Any, args: Mapping[str, Any], declared_keys: Iterable[str] = ()) -> Any:
+    declared = set(declared_keys) | set(args.keys())
     if isinstance(value, str):
-        full = re.fullmatch(
-            r"(?:\{\{\s*args\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}|\{(?:args\.)?([A-Za-z_][A-Za-z0-9_]*)\})",
-            value,
-        )
+        full = _ARG_PLACEHOLDER_RE.fullmatch(value)
         if full:
             key = full.group(1) or full.group(2)
             if key in args:
                 return args[key]
+            if key in declared:
+                return ""
 
         def _sub(match: re.Match[str]) -> str:
             key = match.group(1) or match.group(2)
-            if key not in args:
-                return match.group(0)
-            return "" if args[key] is None else str(args[key])
+            if key in args:
+                return "" if args[key] is None else str(args[key])
+            if key in declared:
+                return ""
+            return match.group(0)
 
-        return re.sub(
-            r"\{\{\s*args\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}|\{(?:args\.)?([A-Za-z_][A-Za-z0-9_]*)\}",
-            _sub,
-            value,
-        )
+        return _ARG_PLACEHOLDER_RE.sub(_sub, value)
     if isinstance(value, list):
-        return [_render_arg_template(item, args) for item in value]
+        return [_render_arg_template(item, args, declared) for item in value]
     if isinstance(value, dict):
-        return {str(k): _render_arg_template(v, args) for k, v in value.items()}
+        return {str(k): _render_arg_template(v, args, declared) for k, v in value.items()}
     return value
 
 
@@ -1097,7 +1110,7 @@ class ToolForgeService:
             headers_tpl = dict(http_spec.get("headers") or {})
             query_tpl = dict(http_spec.get("query") or http_spec.get("query_template") or {})
             body_tpl = http_spec["body"] if "body" in http_spec else http_spec.get("json_body_template")
-            response_path = str(http_spec.get("response_path") or "").strip()
+            response_path = str(http_spec.get("response_path") or http_spec.get("result_path") or "").strip()
             timeout_sec = max(1.0, min(float(http_spec.get("timeout_seconds") or 15.0), 45.0))
             spec_clean = {
                 "method": method,
@@ -1108,11 +1121,17 @@ class ToolForgeService:
                 "response_path": response_path,
                 "timeout_seconds": timeout_sec,
             }
-            secret_refs = extract_referenced_secrets(spec_clean)
+            declared_param_names = tuple((schema.get("properties") or {}).keys())
+            secret_refs = extract_referenced_secrets(spec_clean, exclude_names=declared_param_names)
             definition["http_spec"] = spec_clean
         elif kind == "python_plugin":
             validate_plugin_ast(python_code)
-            secret_refs = extract_referenced_secrets(python_code, include_hmac_calls=True)
+            declared_param_names = tuple((schema.get("properties") or {}).keys())
+            secret_refs = extract_referenced_secrets(
+                python_code,
+                include_hmac_calls=True,
+                exclude_names=declared_param_names,
+            )
             explicit_refs = http_spec.get("secret_refs") if isinstance(http_spec, Mapping) else None
             if isinstance(explicit_refs, list):
                 secret_refs = tuple(sorted(set(secret_refs) | {validate_secret_name(x) for x in explicit_refs}))
@@ -1216,7 +1235,8 @@ class ToolForgeService:
                 filtered_rules = domain_rules
             domain_rules = filtered_rules
 
-        secret_refs = tuple(definition.get("secret_refs") or ())
+        declared_param_names = tuple((schema.get("properties") or {}).keys())
+        secret_refs = tuple(s for s in (definition.get("secret_refs") or ()) if s not in declared_param_names)
         secret_map = self.secrets_vault.get_map(secret_refs)
         all_secrets = self.secrets_vault.all_secret_values()
 
@@ -1224,22 +1244,27 @@ class ToolForgeService:
             spec = dict(definition["http_spec"])
             url_rendered = spec["url_template"]
             used_in_url: set[str] = set()
-            for match in re.finditer(r"\{\{\s*args\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}|\{(?:args\.)?([A-Za-z_][A-Za-z0-9_]*)\}", url_rendered):
+            for match in _ARG_PLACEHOLDER_RE.finditer(url_rendered):
                 key = match.group(1) or match.group(2)
-                if key in validated_args:
+                if key in validated_args or key in declared_param_names:
                     used_in_url.add(key)
             for k in used_in_url:
-                qval = urllib.parse.quote("" if validated_args[k] is None else str(validated_args[k]), safe="")
+                raw_val = validated_args.get(k)
+                qval = urllib.parse.quote("" if raw_val is None else str(raw_val), safe="")
                 url_rendered = re.sub(
-                    r"\{\{\s*args\." + re.escape(k) + r"\s*\}\}|\{(?:args\.)?" + re.escape(k) + r"\}",
+                    r"\{\{\s*(?:args\.)?" + re.escape(k) + r"\s*\}\}|\{(?:args\.)?" + re.escape(k) + r"\}",
                     qval,
                     url_rendered,
                 )
-            headers_rendered = _render_arg_template(spec.get("headers") or {}, validated_args)
-            query_rendered = _render_arg_template(spec.get("query") or {}, validated_args)
+            headers_rendered = _render_arg_template(spec.get("headers") or {}, validated_args, declared_param_names)
+            query_rendered = _render_arg_template(spec.get("query") or {}, validated_args, declared_param_names)
             if spec["method"] in {"GET", "DELETE"} and not spec.get("query"):
                 query_rendered = {k: v for k, v in validated_args.items() if k not in used_in_url and v is not None}
-            body_rendered = _render_arg_template(spec.get("body"), validated_args) if spec.get("body") is not None else None
+            body_rendered = (
+                _render_arg_template(spec.get("body"), validated_args, declared_param_names)
+                if spec.get("body") is not None
+                else None
+            )
             if body_rendered is None and spec["method"] in {"POST", "PUT", "PATCH"}:
                 body_rendered = {k: v for k, v in validated_args.items() if k not in used_in_url}
             res = execute_restricted_http(
@@ -1400,8 +1425,10 @@ class ToolForgeService:
             if missing:
                 raise ToolForgeSecurityError(f"allowlisted domain(s) missing before release: {', '.join(missing)}")
 
+        declared_props = set(((defn.get("input_schema") or {}).get("properties") or {}).keys())
+        effective_secret_refs = [s for s in (defn.get("secret_refs") or ()) if s not in declared_props]
         missing_secrets = [
-            s for s in (defn.get("secret_refs") or ())
+            s for s in effective_secret_refs
             if s not in self.secrets_vault.get_map([s])
         ]
         if missing_secrets:

@@ -130,7 +130,7 @@ _FORGE_BUILTIN_TOOLS: tuple[dict[str, Any], ...] = (
                 "operation_type": {"type": "string", "enum": ["read", "write"], "description": "读操作还是写操作"},
                 "target_visibility": {"type": "string", "enum": ["admin", "internal", "common"], "description": "拟发布范围：admin(仅管理员)/internal(员工群+管理员)/common(全部含客户群)"},
                 "input_schema": {"type": "object", "description": "标准 JSON Schema object，需声明 properties/required 及每个参数的 description", "additionalProperties": True},
-                "http_spec": {"type": "object", "description": "kind=http_api 必填：{method, url_template, headers, query_template, json_body_template, pagination, result_path}", "additionalProperties": True},
+                "http_spec": {"type": "object", "description": "kind=http_api 必填：{method, url_template, headers, query_template, json_body_template, response_path}；入参占位符用 {{args.参数名}} 或 {{参数名}}，密钥占位符用 {{SECRET_ALIAS}}", "additionalProperties": True},
                 "python_code": {"type": "string", "description": "kind=python_plugin 必填：需定义 def run(args, ctx): ...，可用 ctx.http.get/post 和 ctx.hmac_sha256"},
                 "script_name": {"type": "string", "description": "kind=shared_script 必填：脚本文件名（如 calc_margin.py）"},
                 "script_content": {"type": "string", "description": "kind=shared_script 必填：完整离线脚本源码"},
